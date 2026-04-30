@@ -150,7 +150,11 @@ func restoreArgs(profile config.Profile, request RestoreRequest, staging, includ
 }
 
 func snapshotValidationArgs(profile config.Profile, request RestoreRequest, include string) []string {
-	args := []string{"restic", "-r", profile.RepositoryString(), "snapshots", request.SnapshotID, "--json", "--path", include}
+	args := []string{"restic", "-r", profile.RepositoryString(), "snapshots"}
+	if request.SnapshotID != "" {
+		args = append(args, request.SnapshotID)
+	}
+	args = append(args, "--json", "--path", include)
 	args = withRetryLock(args)
 	if request.App != "" {
 		args = append(args, "--tag", "volust", "--tag", "app:"+request.App)

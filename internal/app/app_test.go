@@ -383,6 +383,210 @@ func TestRunRestorePromptsForMissingAppAndSource(t *testing.T) {
 	}
 }
 
+func TestRunAppsListsDiscoveredApplications(t *testing.T) {
+	path := writeConfig(t)
+	fake := &appFakeRuntime{
+		containers: []volustdocker.Container{{
+			ID:      "abc",
+			Name:    "/postgres",
+			Running: true,
+			Labels: map[string]string{
+				"volust.enabled":   "true",
+				"volust.profile":   "s3prod",
+				"volust.sources":   "/data,/config",
+				"volust.schedule":  "0 3 * * *",
+				"volust.retention": "keep-last=7",
+			},
+			Mounts: []volustdocker.Mount{
+				{Type: "volume", Name: "pgdata", Destination: "/data"},
+				{Type: "volume", Name: "pgconfig", Destination: "/config"},
+			},
+		}},
+	}
+	oldRuntime := newRuntime
+	newRuntime = func() (daemonRuntime, error) {
+		return fake, nil
+	}
+	defer func() {
+		newRuntime = oldRuntime
+	}()
+
+	var out bytes.Buffer
+	err := Run([]string{"apps", "--config", path, "--profile", "s3prod"}, strings.NewReader(""), &out)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	output := out.String()
+	for _, want := range []string{"postgres", "data", "config", "0 3 * * *", "running"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("apps output %q does not contain %q", output, want)
+		}
+	}
+}
+
+func TestRunSnapshotsPromptsForAppAndSource(t *testing.T) {
+	path := writeConfig(t)
+	fake := &appFakeRuntime{
+		containers: []volustdocker.Container{{
+			ID:   "abc",
+			Name: "/postgres",
+			Labels: map[string]string{
+				"volust.enabled":  "true",
+				"volust.profile":  "s3prod",
+				"volust.sources":  "/data,/config",
+				"volust.schedule": "0 3 * * *",
+			},
+			Mounts: []volustdocker.Mount{
+				{Type: "volume", Name: "pgdata", Destination: "/data"},
+				{Type: "volume", Name: "pgconfig", Destination: "/config"},
+			},
+		}},
+		snapshotOutput: `[{"short_id":"snap-new","id":"snap-new","time":"2026-01-02T00:00:00Z","tags":["volust","app:postgres","profile:s3prod","source:config"]},{"short_id":"snap-old","id":"snap-old","time":"2026-01-01T00:00:00Z","tags":["volust","app:postgres","profile:s3prod","source:config"]}]`,
+	}
+	oldRuntime := newRuntime
+	newRuntime = func() (daemonRuntime, error) {
+		return fake, nil
+	}
+	defer func() {
+		newRuntime = oldRuntime
+	}()
+
+	var out bytes.Buffer
+	err := Run([]string{"snapshots", "--config", path, "--profile", "s3prod"}, strings.NewReader("1\n2\n"), &out)
+	if err != nil {
+		t.Fatalf("Run returned error: %v\noutput: %s", err, out.String())
+	}
+	if !equalStrings(fake.events, []string{"job:snapshots"}) {
+		t.Fatalf("events = %#v", fake.events)
+	}
+	output := out.String()
+	for _, want := range []string{"Select application", "Select source", "snap-new", "snap-old", "2026-01-02T00:00:00Z"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("snapshots output %q does not contain %q", output, want)
+		}
+	}
+	if got := strings.Join(fake.jobs[0].Args, " "); !strings.Contains(got, "source:config") || strings.Contains(got, " latest ") {
+		t.Fatalf("snapshots command = %q", got)
+	}
+}
+
+func TestRunSnapshotsUsesParameters(t *testing.T) {
+	path := writeConfig(t)
+	fake := &appFakeRuntime{
+		containers: []volustdocker.Container{{
+			ID:   "abc",
+			Name: "/postgres",
+			Labels: map[string]string{
+				"volust.enabled":  "true",
+				"volust.profile":  "s3prod",
+				"volust.sources":  "/data",
+				"volust.schedule": "0 3 * * *",
+			},
+			Mounts: []volustdocker.Mount{{Type: "volume", Name: "pgdata", Destination: "/data"}},
+		}},
+		snapshotOutput: `[{"short_id":"snap-1","id":"snap-1","time":"2026-01-01T00:00:00Z","tags":["volust","app:postgres","profile:s3prod","source:data"]}]`,
+	}
+	oldRuntime := newRuntime
+	newRuntime = func() (daemonRuntime, error) {
+		return fake, nil
+	}
+	defer func() {
+		newRuntime = oldRuntime
+	}()
+
+	var out bytes.Buffer
+	err := Run([]string{"snapshots", "--config", path, "--profile", "s3prod", "--app", "postgres", "--source", "data"}, strings.NewReader(""), &out)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if strings.Contains(out.String(), "Select application") || !strings.Contains(out.String(), "snap-1") {
+		t.Fatalf("snapshots output = %q", out.String())
+	}
+}
+
+func TestRunBackupUsesAppParameterAndBacksUpAllSources(t *testing.T) {
+	path := writeConfig(t)
+	fake := &appFakeRuntime{
+		containers: []volustdocker.Container{{
+			ID:   "abc",
+			Name: "/postgres",
+			Labels: map[string]string{
+				"volust.enabled":   "true",
+				"volust.profile":   "s3prod",
+				"volust.sources":   "/data,/config",
+				"volust.schedule":  "0 3 * * *",
+				"volust.retention": "keep-last=7",
+			},
+			Mounts: []volustdocker.Mount{
+				{Type: "volume", Name: "pgdata", Destination: "/data"},
+				{Type: "volume", Name: "pgconfig", Destination: "/config"},
+			},
+		}},
+	}
+	oldRuntime := newRuntime
+	newRuntime = func() (daemonRuntime, error) {
+		return fake, nil
+	}
+	defer func() {
+		newRuntime = oldRuntime
+	}()
+
+	var out bytes.Buffer
+	err := Run([]string{"backup", "--config", path, "--profile", "s3prod", "--app", "postgres"}, strings.NewReader(""), &out)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if !equalStrings(fake.events, []string{"job:backup", "job:forget", "job:prune", "job:backup", "job:forget", "job:prune"}) {
+		t.Fatalf("events = %#v", fake.events)
+	}
+	if !strings.Contains(out.String(), "backup complete: app=postgres sources=2 jobs_started=6") {
+		t.Fatalf("backup output = %q", out.String())
+	}
+}
+
+func TestRunBackupPromptsForMissingAppAndSupportsSourceParameter(t *testing.T) {
+	path := writeConfig(t)
+	fake := &appFakeRuntime{
+		containers: []volustdocker.Container{{
+			ID:   "abc",
+			Name: "/postgres",
+			Labels: map[string]string{
+				"volust.enabled":   "true",
+				"volust.profile":   "s3prod",
+				"volust.sources":   "/data,/config",
+				"volust.schedule":  "0 3 * * *",
+				"volust.retention": "keep-last=7",
+			},
+			Mounts: []volustdocker.Mount{
+				{Type: "volume", Name: "pgdata", Destination: "/data"},
+				{Type: "volume", Name: "pgconfig", Destination: "/config"},
+			},
+		}},
+	}
+	oldRuntime := newRuntime
+	newRuntime = func() (daemonRuntime, error) {
+		return fake, nil
+	}
+	defer func() {
+		newRuntime = oldRuntime
+	}()
+
+	var out bytes.Buffer
+	err := Run([]string{"backup", "--config", path, "--profile", "s3prod", "--source", "config"}, strings.NewReader("1\n"), &out)
+	if err != nil {
+		t.Fatalf("Run returned error: %v\noutput: %s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "Select application") {
+		t.Fatalf("interactive output = %q", out.String())
+	}
+	if !equalStrings(fake.events, []string{"job:backup", "job:forget", "job:prune"}) {
+		t.Fatalf("events = %#v", fake.events)
+	}
+	if len(fake.jobs) == 0 || !strings.Contains(fake.jobs[0].Args[2], "/volust/sources/config") {
+		t.Fatalf("backup job = %#v", fake.jobs)
+	}
+}
+
 func writeConfig(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -402,6 +606,7 @@ type appFakeRuntime struct {
 	sawIncludeStopped       bool
 	sawCanceledStartContext bool
 	runJobErrByOperation    map[string]error
+	snapshotOutput          string
 }
 
 func (f *appFakeRuntime) ListContainers(_ context.Context, options volustdocker.ListOptions) ([]volustdocker.Container, error) {
@@ -424,6 +629,9 @@ func (f *appFakeRuntime) RunJob(_ context.Context, job volustdocker.JobSpec) err
 func (f *appFakeRuntime) RunJobOutput(_ context.Context, job volustdocker.JobSpec) ([]byte, error) {
 	f.jobs = append(f.jobs, job)
 	f.events = append(f.events, "job:"+job.Operation)
+	if f.snapshotOutput != "" {
+		return []byte(f.snapshotOutput), nil
+	}
 	source := "data"
 	profile := "s3prod"
 	if len(job.Args) > 0 {

@@ -74,6 +74,7 @@ func RunOnce(ctx context.Context, cfg config.Config, runtime Runtime, options Op
 			pruneNames[spec.Profile] = spec.Name
 		}
 		for _, source := range spec.Sources {
+			logDiscovered(options.LogWriter, spec, source)
 			jobsStarted, err := RunSourceJobs(ctx, runtime, options, profile, spec, source, false)
 			if err != nil {
 				return report, err
@@ -162,6 +163,7 @@ func reconcileSchedules(ctx context.Context, scheduler *cron.Cron, entries map[s
 			if _, ok := entries[key]; ok {
 				continue
 			}
+			logDiscovered(options.LogWriter, spec, source)
 			spec := spec
 			source := source
 			profile := profile
@@ -303,4 +305,11 @@ func logSkip(writer io.Writer, container volustdocker.Container, err error) {
 		name = container.ID
 	}
 	fmt.Fprintf(writer, "skipping container=%s: %v\n", name, err)
+}
+
+func logDiscovered(writer io.Writer, spec volustdocker.BackupSpec, source volustdocker.Source) {
+	if writer == nil {
+		return
+	}
+	fmt.Fprintf(writer, "info backup enabled app discovered app=%s profile=%s source=%s schedule=%q\n", spec.Name, spec.Profile, source.ID, spec.Schedule.Expr)
 }

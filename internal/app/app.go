@@ -42,6 +42,12 @@ func Run(args []string, in io.Reader, out io.Writer) error {
 	switch args[0] {
 	case "daemon":
 		return runDaemon(args[1:], out)
+	case "apps":
+		return runApps(args[1:], out)
+	case "snapshots":
+		return runSnapshots(args[1:], in, out)
+	case "backup":
+		return runBackup(args[1:], in, out)
 	case "restore":
 		return runRestore(args[1:], in, out)
 	default:
@@ -90,6 +96,126 @@ func runDaemon(args []string, out io.Writer) error {
 	return nil
 }
 
+func runApps(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("apps", flag.ContinueOnError)
+	fs.SetOutput(out)
+	configPath := fs.String("config", "", "optional path to config.yaml")
+	profile := fs.String("profile", "", "profile name")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, profileName, err := loadConfigAndProfile(*configPath, *profile)
+	if err != nil {
+		return err
+	}
+	runtime, err := newRuntime()
+	if err != nil {
+		return err
+	}
+	candidates, err := restoreCandidates(context.Background(), runtime, cfg, profileName)
+	if err != nil {
+		return err
+	}
+	if len(candidates) == 0 {
+		return fmt.Errorf("no applications found for profile=%s", profileName)
+	}
+	fmt.Fprintf(out, "Applications for profile=%s\n", profileName)
+	for _, candidate := range candidates {
+		state := "stopped"
+		if candidate.Running {
+			state = "running"
+		}
+		fmt.Fprintf(out, "%s\t%s\t%s\t%s\n", candidate.Spec.Name, candidate.Source.ID, state, candidate.Spec.Schedule.Expr)
+	}
+	return nil
+}
+
+func runSnapshots(args []string, in io.Reader, out io.Writer) error {
+	fs := flag.NewFlagSet("snapshots", flag.ContinueOnError)
+	fs.SetOutput(out)
+	configPath := fs.String("config", "", "optional path to config.yaml")
+	profile := fs.String("profile", "", "profile name")
+	appName := fs.String("app", "", "application name")
+	source := fs.String("source", "", "source id")
+	snapshot := fs.String("snapshot", "", "optional snapshot id, for example latest")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, profileName, err := loadConfigAndProfile(*configPath, *profile)
+	if err != nil {
+		return err
+	}
+	reader := bufio.NewReader(in)
+	runtime, err := newRuntime()
+	if err != nil {
+		return err
+	}
+	selected, err := resolveRestoreSelection(context.Background(), runtime, cfg, profileName, *appName, *source, reader, out)
+	if err != nil {
+		return err
+	}
+	snapshots, err := querySnapshots(context.Background(), runtime, cfg.Profiles[profileName], restic.RestoreRequest{
+		SnapshotID: *snapshot,
+		App:        selected.Spec.Name,
+		Profile:    profileName,
+		SourceID:   selected.Source.ID,
+	})
+	if err != nil {
+		return err
+	}
+	sort.Slice(snapshots, func(i, j int) bool {
+		return snapshots[i].Time > snapshots[j].Time
+	})
+	fmt.Fprintf(out, "Snapshots for profile=%s app=%s source=%s\n", profileName, selected.Spec.Name, selected.Source.ID)
+	if len(snapshots) == 0 {
+		fmt.Fprintln(out, "No snapshots found")
+		return nil
+	}
+	for _, snapshot := range snapshots {
+		fmt.Fprintf(out, "%s\t%s\n", snapshot.SnapshotID(), snapshot.Time)
+	}
+	return nil
+}
+
+func runBackup(args []string, in io.Reader, out io.Writer) error {
+	fs := flag.NewFlagSet("backup", flag.ContinueOnError)
+	fs.SetOutput(out)
+	configPath := fs.String("config", "", "optional path to config.yaml")
+	profile := fs.String("profile", "", "profile name")
+	appName := fs.String("app", "", "application name")
+	source := fs.String("source", "", "optional source id")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, profileName, err := loadConfigAndProfile(*configPath, *profile)
+	if err != nil {
+		return err
+	}
+	reader := bufio.NewReader(in)
+	runtime, err := newRuntime()
+	if err != nil {
+		return err
+	}
+	selected, err := resolveBackupSelection(context.Background(), runtime, cfg, profileName, *appName, *source, reader, out)
+	if err != nil {
+		return err
+	}
+	profileCfg := cfg.Profiles[profileName]
+	var jobsStarted int
+	for _, candidate := range selected {
+		if err := daemon.LoadExcludeFiles("/etc/volust/excludes", &candidate.Spec); err != nil {
+			return err
+		}
+		started, err := daemon.RunSourceJobs(context.Background(), runtime, daemon.Options{JobImage: jobImage()}, profileCfg, candidate.Spec, candidate.Source, true)
+		if err != nil {
+			return err
+		}
+		jobsStarted += started
+	}
+	fmt.Fprintf(out, "backup complete: app=%s sources=%d jobs_started=%d\n", selected[0].Spec.Name, len(selected), jobsStarted)
+	return nil
+}
+
 func runRestore(args []string, in io.Reader, out io.Writer) error {
 	fs := flag.NewFlagSet("restore", flag.ContinueOnError)
 	fs.SetOutput(out)
@@ -102,16 +228,11 @@ func runRestore(args []string, in io.Reader, out io.Writer) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	cfg, err := config.LoadDefault(*configPath)
+	cfg, profileName, err := loadConfigAndProfile(*configPath, *profile)
 	if err != nil {
 		return err
 	}
-	if *profile == "" {
-		*profile = "default"
-	}
-	if _, ok := cfg.Profiles[*profile]; !ok {
-		return fmt.Errorf("unknown profile %q", *profile)
-	}
+	*profile = profileName
 	reader := bufio.NewReader(in)
 	runtime, err := newRuntime()
 	if err != nil {
@@ -158,6 +279,20 @@ func runRestore(args []string, in io.Reader, out io.Writer) error {
 	return nil
 }
 
+func loadConfigAndProfile(configPath, profileName string) (config.Config, string, error) {
+	cfg, err := config.LoadDefault(configPath)
+	if err != nil {
+		return config.Config{}, "", err
+	}
+	if profileName == "" {
+		profileName = "default"
+	}
+	if _, ok := cfg.Profiles[profileName]; !ok {
+		return config.Config{}, "", fmt.Errorf("unknown profile %q", profileName)
+	}
+	return cfg, profileName, nil
+}
+
 func restoreWithStoppedContainers(ctx context.Context, runtime daemonRuntime, cfg config.Config, profileName, appName, sourceID, snapshotID string, skipPreBackup bool, selected restoreCandidate, stopped []string) error {
 	if !skipPreBackup {
 		profileCfg := cfg.Profiles[profileName]
@@ -189,10 +324,55 @@ func restoreWithStoppedContainers(ctx context.Context, runtime daemonRuntime, cf
 	return restartContainers(ctx, runtime, stopped, nil)
 }
 
+func resolveBackupSelection(ctx context.Context, runtime daemonRuntime, cfg config.Config, profileName, appName, sourceID string, reader *bufio.Reader, out io.Writer) ([]restoreCandidate, error) {
+	candidates, err := restoreCandidates(ctx, runtime, cfg, profileName)
+	if err != nil {
+		return nil, err
+	}
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("no backup candidates found for profile=%s", profileName)
+	}
+
+	if appName == "" {
+		appName, err = promptChoice(reader, out, "Select application", uniqueApps(candidates))
+		if err != nil {
+			return nil, err
+		}
+	}
+	appCandidates := filterCandidates(candidates, func(candidate restoreCandidate) bool {
+		return candidate.Spec.Name == appName
+	})
+	if len(appCandidates) == 0 {
+		return nil, fmt.Errorf("backup app not found for profile=%s app=%s", profileName, appName)
+	}
+	if sourceID == "" {
+		return appCandidates, nil
+	}
+	sourceCandidates := filterCandidates(appCandidates, func(candidate restoreCandidate) bool {
+		return candidate.Source.ID == sourceID
+	})
+	if len(sourceCandidates) == 0 {
+		return nil, fmt.Errorf("backup source not found for profile=%s app=%s source=%s", profileName, appName, sourceID)
+	}
+	return sourceCandidates, nil
+}
+
 func resolveSnapshot(ctx context.Context, runtime daemonRuntime, profile config.Profile, request restic.RestoreRequest) (string, error) {
 	if request.SnapshotID != "latest" {
 		return request.SnapshotID, nil
 	}
+	snapshots, err := querySnapshots(ctx, runtime, profile, request)
+	if err != nil {
+		return "", err
+	}
+	snapshot, ok := restic.LatestSnapshot(snapshots, request.App, request.Profile, request.SourceID)
+	if !ok || snapshot.SnapshotID() == "" {
+		return "", fmt.Errorf("no matching snapshot found for app=%s profile=%s source=%s", request.App, request.Profile, request.SourceID)
+	}
+	return snapshot.SnapshotID(), nil
+}
+
+func querySnapshots(ctx context.Context, runtime daemonRuntime, profile config.Profile, request restic.RestoreRequest) ([]restic.Snapshot, error) {
 	command := restic.SnapshotsCommand(profile, request)
 	job := volustdocker.JobSpec{
 		Name:      "volust-snapshots-" + strings.ReplaceAll(request.App+"-"+request.SourceID, "/", "-"),
@@ -203,17 +383,13 @@ func resolveSnapshot(ctx context.Context, runtime daemonRuntime, profile config.
 	}
 	output, err := runtime.RunJobOutput(ctx, job)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	var snapshots []restic.Snapshot
 	if err := json.Unmarshal(output, &snapshots); err != nil {
-		return "", err
+		return nil, err
 	}
-	snapshot, ok := restic.LatestSnapshot(snapshots, request.App, request.Profile, request.SourceID)
-	if !ok || snapshot.SnapshotID() == "" {
-		return "", fmt.Errorf("no matching snapshot found for app=%s profile=%s source=%s", request.App, request.Profile, request.SourceID)
-	}
-	return snapshot.SnapshotID(), nil
+	return snapshots, nil
 }
 
 func stopMountedContainers(ctx context.Context, runtime daemonRuntime, selected restoreCandidate) ([]string, error) {
@@ -401,7 +577,7 @@ func includeStoppedContainers() bool {
 }
 
 func usage(out io.Writer) error {
-	fmt.Fprintln(out, "usage: volust <daemon|restore> [options]")
+	fmt.Fprintln(out, "usage: volust <daemon|apps|snapshots|backup|restore> [options]")
 	return errors.New("missing or unknown command")
 }
 

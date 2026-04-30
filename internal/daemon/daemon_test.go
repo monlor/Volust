@@ -271,6 +271,36 @@ func TestRunOnceLogsSkippedContainerReasons(t *testing.T) {
 	}
 }
 
+func TestRunOnceLogsDiscoveredBackupApplications(t *testing.T) {
+	runtime := &fakeRuntime{
+		containers: []volustdocker.Container{{
+			ID:   "abc",
+			Name: "/postgres",
+			Labels: map[string]string{
+				"volust.enabled":  "true",
+				"volust.profile":  "s3prod",
+				"volust.sources":  "/data",
+				"volust.schedule": "0 3 * * *",
+			},
+			Mounts: []volustdocker.Mount{{Type: "volume", Name: "pgdata", Destination: "/data"}},
+		}},
+	}
+	cfg := config.Config{Profiles: map[string]config.Profile{
+		"s3prod": {Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app", Password: "secret"},
+	}}
+	var log bytes.Buffer
+
+	if _, err := RunOnce(context.Background(), cfg, runtime, Options{JobImage: "volust:latest", LogWriter: &log}); err != nil {
+		t.Fatalf("RunOnce returned error: %v", err)
+	}
+	got := log.String()
+	for _, want := range []string{"backup enabled app discovered", "app=postgres", "profile=s3prod", "source=data", "schedule=\"0 3 * * *\""} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("discovery log %q does not contain %q", got, want)
+		}
+	}
+}
+
 func TestRunSchedulerRescansForNewContainers(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	runtime := &fakeRuntime{
@@ -297,13 +327,20 @@ func TestRunSchedulerRescansForNewContainers(t *testing.T) {
 	cfg := config.Config{Profiles: map[string]config.Profile{
 		"s3prod": {Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app", Password: "secret"},
 	}}
+	var log bytes.Buffer
 
-	report, err := RunScheduler(ctx, cfg, runtime, Options{JobImage: "volust:latest", RefreshInterval: time.Millisecond})
+	report, err := RunScheduler(ctx, cfg, runtime, Options{JobImage: "volust:latest", RefreshInterval: time.Millisecond, LogWriter: &log})
 	if err != context.Canceled {
 		t.Fatalf("RunScheduler error = %v", err)
 	}
 	if report.Scheduled != 1 {
 		t.Fatalf("report = %#v", report)
+	}
+	got := log.String()
+	for _, want := range []string{"backup enabled app discovered", "app=postgres", "profile=s3prod", "source=data", "schedule=\"0 3 * * *\""} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("scheduler discovery log %q does not contain %q", got, want)
+		}
 	}
 }
 

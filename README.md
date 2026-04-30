@@ -60,6 +60,36 @@ Run one immediate backup scan using the existing Volust container:
 docker exec volust volust daemon --once
 ```
 
+List discovered backup applications and sources:
+
+```bash
+docker exec volust volust apps
+docker exec volust volust apps --profile default
+```
+
+Trigger a backup for an application immediately:
+
+```bash
+docker exec -it volust volust backup
+docker exec volust volust backup --profile default --app my-app
+docker exec volust volust backup --profile default --app my-app --source data
+```
+
+When `--source` is omitted, Volust backs up all sources for the selected application. The command uses the same backup, retention, prune, exclude, and source-locking path as scheduled backups.
+
+List snapshots for an application interactively:
+
+```bash
+docker exec -it volust volust snapshots
+```
+
+Or pass the selection directly:
+
+```bash
+docker exec volust volust snapshots --profile default --app my-app --source data
+docker exec volust volust snapshots --profile default --app my-app --source data --snapshot latest
+```
+
 Restore interactively using the existing Volust container:
 
 ```bash
@@ -148,6 +178,8 @@ Optional labels:
 - `volust.sources=/data,/config` defaults to all regular bind and volume mounts, excluding socket and device/system mounts
 - `volust.schedule=0 3 * * *` defaults to `VOLUST_DEFAULT_SCHEDULE`
 - `volust.retention=keep-last=7,keep-daily=7,keep-weekly=4,keep-monthly=6` defaults to `VOLUST_DEFAULT_RETENTION`
+
+`volust.enabled=true` only opts a container into discovery. Backup frequency is controlled by `volust.schedule`; if that label is omitted, Volust uses `VOLUST_DEFAULT_SCHEDULE` from the Volust service environment. The daemon refreshes discovered containers every minute and schedules each source with its cron expression. Use `docker exec volust volust backup --app <app-name>` for an immediate application backup outside the schedule, or `docker exec volust volust daemon --once` to scan and back up all discovered applications once.
 
 When provided, sources must exactly match mounted paths inside the application container. Volust maps each source into a job container at `/volust/sources/<source-id>`.
 
