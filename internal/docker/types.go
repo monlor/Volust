@@ -134,10 +134,26 @@ func isBackupSourceMount(mount Mount) bool {
 	if mount.Type != "" && mount.Type != "bind" && mount.Type != "volume" {
 		return false
 	}
+	if mount.Type == "volume" && isAnonymousVolumeName(mount.Name) {
+		return false
+	}
 	if isSocketPath(source) || isSocketPath(destination) {
 		return false
 	}
 	return !isDeviceOrSystemPath(destination)
+}
+
+func isAnonymousVolumeName(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) != 64 {
+		return false
+	}
+	for _, char := range value {
+		if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 func isSocketPath(value string) bool {

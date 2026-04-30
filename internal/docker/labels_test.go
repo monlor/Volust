@@ -108,6 +108,59 @@ func TestParseBackupSpecDefaultsSourcesFromBackupMounts(t *testing.T) {
 	}
 }
 
+func TestParseBackupSpecDefaultsSkipAnonymousImageVolumes(t *testing.T) {
+	spec, err := ParseBackupSpec(Container{
+		Name: "/postgres",
+		Labels: map[string]string{
+			"volust.enabled":  "true",
+			"volust.schedule": "0 3 * * *",
+		},
+		Mounts: []Mount{
+			{
+				Type:        "volume",
+				Name:        "1a6838d5b10dddd30dcbeb0ab209b89f3b320d1138e9b573ecc78bc0d1b822f8",
+				Source:      "/var/lib/docker/volumes/1a6838d5b10dddd30dcbeb0ab209b89f3b320d1138e9b573ecc78bc0d1b822f8/_data",
+				Destination: "/var/lib/postgresql",
+			},
+			{
+				Type:        "volume",
+				Name:        "saas_sub2api-postgres-data",
+				Source:      "/var/lib/docker/volumes/saas_sub2api-postgres-data/_data",
+				Destination: "/var/lib/postgresql/data",
+			},
+		},
+	}, map[string]config.Profile{"default": {Type: config.ProfileS3}})
+	if err != nil {
+		t.Fatalf("ParseBackupSpec returned error: %v", err)
+	}
+	if len(spec.Sources) != 1 || spec.Sources[0].ContainerPath != "/var/lib/postgresql/data" {
+		t.Fatalf("sources = %#v", spec.Sources)
+	}
+}
+
+func TestParseBackupSpecDefaultsKeepNamedNestedVolumes(t *testing.T) {
+	spec, err := ParseBackupSpec(Container{
+		Name: "/postgres",
+		Labels: map[string]string{
+			"volust.enabled":  "true",
+			"volust.schedule": "0 3 * * *",
+		},
+		Mounts: []Mount{
+			{Type: "volume", Name: "postgres-root", Destination: "/var/lib/postgresql"},
+			{Type: "volume", Name: "postgres-data", Destination: "/var/lib/postgresql/data"},
+		},
+	}, map[string]config.Profile{"default": {Type: config.ProfileS3}})
+	if err != nil {
+		t.Fatalf("ParseBackupSpec returned error: %v", err)
+	}
+	if len(spec.Sources) != 2 {
+		t.Fatalf("sources = %#v", spec.Sources)
+	}
+	if spec.Sources[0].ContainerPath != "/var/lib/postgresql" || spec.Sources[1].ContainerPath != "/var/lib/postgresql/data" {
+		t.Fatalf("sources = %#v", spec.Sources)
+	}
+}
+
 func TestParseBackupSpecUsesDefaultScheduleAndRetention(t *testing.T) {
 	spec, err := ParseBackupSpecWithDefaults(Container{
 		Name: "/postgres",
