@@ -192,6 +192,9 @@ func (p Profile) ResticEnv() map[string]string {
 }
 
 func (p Profile) validate(name string) error {
+	if p.Env["RESTIC_PASSWORD_FILE"] != "" {
+		return fmt.Errorf("profile %q: RESTIC_PASSWORD_FILE is not supported because job containers cannot access host-local password files; use RESTIC_PASSWORD or RESTIC_PASSWORD_COMMAND instead", name)
+	}
 	if !p.hasResticPassword() {
 		return fmt.Errorf("profile %q: restic password is required", name)
 	}
@@ -224,7 +227,7 @@ func (p Profile) hasResticPassword() bool {
 	if p.Password != "" {
 		return true
 	}
-	for _, key := range []string{"RESTIC_PASSWORD", "RESTIC_PASSWORD_FILE", "RESTIC_PASSWORD_COMMAND"} {
+	for _, key := range []string{"RESTIC_PASSWORD", "RESTIC_PASSWORD_COMMAND"} {
 		if p.Env[key] != "" {
 			return true
 		}

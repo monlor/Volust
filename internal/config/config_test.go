@@ -284,16 +284,28 @@ func TestLoadDefaultRejectsMissingResticPassword(t *testing.T) {
 	}
 }
 
-func TestLoadDefaultAcceptsResticPasswordFile(t *testing.T) {
+func TestLoadDefaultRejectsResticPasswordFile(t *testing.T) {
 	t.Setenv("VOLUST_S3_REPOSITORY", "s3:s3.amazonaws.com/bucket/app")
 	t.Setenv("RESTIC_PASSWORD_FILE", "/run/secrets/restic-password")
 
-	cfg, err := LoadDefault("")
-	if err != nil {
-		t.Fatalf("LoadDefault returned error: %v", err)
+	_, err := LoadDefault("")
+	if err == nil {
+		t.Fatal("LoadDefault accepted RESTIC_PASSWORD_FILE")
 	}
-	if got := cfg.Profiles["default"].Env["RESTIC_PASSWORD_FILE"]; got != "/run/secrets/restic-password" {
-		t.Fatalf("RESTIC_PASSWORD_FILE = %q", got)
+	if !strings.Contains(err.Error(), "RESTIC_PASSWORD_FILE is not supported") {
+		t.Fatalf("LoadDefault error = %v", err)
+	}
+}
+
+func TestLoadRejectsConfigProfileWithResticPasswordFile(t *testing.T) {
+	path := writeConfig(t, "profiles:\n  file:\n    type: s3\n    repository: s3:s3.amazonaws.com/file/repo\n    env:\n      RESTIC_PASSWORD_FILE: /run/secrets/restic-password\n")
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load accepted RESTIC_PASSWORD_FILE")
+	}
+	if !strings.Contains(err.Error(), "RESTIC_PASSWORD_FILE is not supported") {
+		t.Fatalf("Load error = %v", err)
 	}
 }
 

@@ -172,6 +172,44 @@ func TestRunRestoreStopsRunningContainerBacksUpRestoresAndRestoresRunningState(t
 	}
 }
 
+func TestRunRestoreValidatesExplicitSnapshotBeforeStoppingOrPreBackup(t *testing.T) {
+	path := writeConfig(t)
+	fake := &appFakeRuntime{
+		containers: []volustdocker.Container{{
+			ID:      "abc",
+			Name:    "/postgres",
+			Running: true,
+			Labels: map[string]string{
+				"volust.enabled":  "true",
+				"volust.profile":  "s3prod",
+				"volust.sources":  "/data",
+				"volust.schedule": "0 3 * * *",
+			},
+			Mounts: []volustdocker.Mount{{Type: "volume", Name: "pgdata", Destination: "/data"}},
+		}},
+		snapshotOutput: `[]`,
+	}
+	oldRuntime := newRuntime
+	newRuntime = func() (daemonRuntime, error) {
+		return fake, nil
+	}
+	defer func() {
+		newRuntime = oldRuntime
+	}()
+
+	var out bytes.Buffer
+	err := Run([]string{"restore", "--config", path, "--profile", "s3prod", "--app", "postgres", "--source", "data", "--snapshot", "missing"}, strings.NewReader("RESTORE postgres/data\n"), &out)
+	if err == nil {
+		t.Fatal("Run succeeded with missing explicit snapshot")
+	}
+	if !strings.Contains(err.Error(), "snapshot missing not found") {
+		t.Fatalf("Run error = %v", err)
+	}
+	if !equalStrings(fake.events, []string{"job:snapshots"}) {
+		t.Fatalf("events = %#v", fake.events)
+	}
+}
+
 func TestRunRestoreCanSkipPreBackup(t *testing.T) {
 	path := writeConfig(t)
 	fake := &appFakeRuntime{

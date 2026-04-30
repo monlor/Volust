@@ -358,12 +358,15 @@ func resolveBackupSelection(ctx context.Context, runtime daemonRuntime, cfg conf
 }
 
 func resolveSnapshot(ctx context.Context, runtime daemonRuntime, profile config.Profile, request restic.RestoreRequest) (string, error) {
-	if request.SnapshotID != "latest" {
-		return request.SnapshotID, nil
-	}
 	snapshots, err := querySnapshots(ctx, runtime, profile, request)
 	if err != nil {
 		return "", err
+	}
+	if request.SnapshotID != "latest" {
+		if len(snapshots) == 0 {
+			return "", fmt.Errorf("snapshot %s not found for app=%s profile=%s source=%s", request.SnapshotID, request.App, request.Profile, request.SourceID)
+		}
+		return request.SnapshotID, nil
 	}
 	snapshot, ok := restic.LatestSnapshot(snapshots, request.App, request.Profile, request.SourceID)
 	if !ok || snapshot.SnapshotID() == "" {
