@@ -544,6 +544,41 @@ func TestRunBackupUsesAppParameterAndBacksUpAllSources(t *testing.T) {
 	}
 }
 
+func TestRunBackupUsesStopBeforeBackupEnvironment(t *testing.T) {
+	t.Setenv("VOLUST_STOP_CONTAINERS_BEFORE_BACKUP", "true")
+	path := writeConfig(t)
+	fake := &appFakeRuntime{
+		containers: []volustdocker.Container{{
+			ID:      "abc",
+			Name:    "/postgres",
+			Running: true,
+			Labels: map[string]string{
+				"volust.enabled":  "true",
+				"volust.profile":  "s3prod",
+				"volust.sources":  "/data",
+				"volust.schedule": "0 3 * * *",
+			},
+			Mounts: []volustdocker.Mount{{Type: "volume", Name: "pgdata", Destination: "/data"}},
+		}},
+	}
+	oldRuntime := newRuntime
+	newRuntime = func() (daemonRuntime, error) {
+		return fake, nil
+	}
+	defer func() {
+		newRuntime = oldRuntime
+	}()
+
+	var out bytes.Buffer
+	err := Run([]string{"backup", "--config", path, "--profile", "s3prod", "--app", "postgres"}, strings.NewReader(""), &out)
+	if err != nil {
+		t.Fatalf("Run returned error: %v\noutput: %s", err, out.String())
+	}
+	if !equalStrings(fake.events, []string{"stop:abc", "job:backup", "start:abc", "job:prune"}) {
+		t.Fatalf("events = %#v", fake.events)
+	}
+}
+
 func TestRunBackupPromptsForMissingAppAndSupportsSourceParameter(t *testing.T) {
 	path := writeConfig(t)
 	fake := &appFakeRuntime{

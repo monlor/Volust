@@ -35,6 +35,10 @@ func SourceLockKey(profile string, spec volustdocker.BackupSpec, source volustdo
 	return profile + "\x00" + spec.Name + "\x00" + source.ID
 }
 
+func ContainerLockKey(containerID string) string {
+	return "container\x00" + containerID
+}
+
 func WithSourceLock(ctx context.Context, key string, fn func() error) error {
 	return sourceLocks.with(ctx, key, fn)
 }

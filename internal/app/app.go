@@ -74,7 +74,7 @@ func runDaemon(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		report, err := daemon.RunOnce(context.Background(), cfg, runtime, daemon.Options{JobImage: jobImage(), IncludeStopped: includeStoppedContainers()})
+		report, err := daemon.RunOnce(context.Background(), cfg, runtime, daemon.Options{JobImage: jobImage(), IncludeStopped: includeStoppedContainers(), StopBeforeBackup: stopContainersBeforeBackup()})
 		if err != nil {
 			return err
 		}
@@ -88,7 +88,7 @@ func runDaemon(args []string, out io.Writer) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	fmt.Fprintln(out, "daemon mode: scheduling discovered label-backed jobs")
-	report, err := daemon.RunScheduler(ctx, cfg, runtime, daemon.Options{JobImage: jobImage(), LogWriter: out, IncludeStopped: includeStoppedContainers()})
+	report, err := daemon.RunScheduler(ctx, cfg, runtime, daemon.Options{JobImage: jobImage(), LogWriter: out, IncludeStopped: includeStoppedContainers(), StopBeforeBackup: stopContainersBeforeBackup()})
 	if err != nil && !errors.Is(err, context.Canceled) {
 		return err
 	}
@@ -206,7 +206,7 @@ func runBackup(args []string, in io.Reader, out io.Writer) error {
 		if err := daemon.LoadExcludeFiles("/etc/volust/excludes", &candidate.Spec); err != nil {
 			return err
 		}
-		started, err := daemon.RunSourceJobs(context.Background(), runtime, daemon.Options{JobImage: jobImage()}, profileCfg, candidate.Spec, candidate.Source, true)
+		started, err := daemon.RunSourceJobs(context.Background(), runtime, daemon.Options{JobImage: jobImage(), StopBeforeBackup: stopContainersBeforeBackup()}, profileCfg, candidate.Spec, candidate.Source, true)
 		if err != nil {
 			return err
 		}
@@ -573,6 +573,11 @@ func jobImage() string {
 
 func includeStoppedContainers() bool {
 	value := strings.TrimSpace(strings.ToLower(os.Getenv("VOLUST_INCLUDE_STOPPED_CONTAINERS")))
+	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
+func stopContainersBeforeBackup() bool {
+	value := strings.TrimSpace(strings.ToLower(os.Getenv("VOLUST_STOP_CONTAINERS_BEFORE_BACKUP")))
 	return value == "1" || value == "true" || value == "yes" || value == "on"
 }
 

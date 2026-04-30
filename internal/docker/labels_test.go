@@ -156,6 +156,25 @@ func TestParseBackupSpecLabelsOverrideDefaults(t *testing.T) {
 	}
 }
 
+func TestParseBackupSpecParsesStopBeforeBackupLabel(t *testing.T) {
+	spec, err := ParseBackupSpec(Container{
+		Name: "/postgres",
+		Labels: map[string]string{
+			"volust.enabled":            "true",
+			"volust.sources":            "/data",
+			"volust.schedule":           "0 3 * * *",
+			"volust.stop-before-backup": "yes",
+		},
+		Mounts: []Mount{{Type: "volume", Name: "pgdata", Destination: "/data"}},
+	}, map[string]config.Profile{"default": {Type: config.ProfileS3}})
+	if err != nil {
+		t.Fatalf("ParseBackupSpec returned error: %v", err)
+	}
+	if !spec.StopBeforeBackupSet || !spec.StopBeforeBackup {
+		t.Fatalf("stop-before-backup not parsed: %#v", spec)
+	}
+}
+
 func TestParseBackupSpecRejectsUnknownProfile(t *testing.T) {
 	_, err := ParseBackupSpec(Container{
 		Name: "/app",

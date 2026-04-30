@@ -162,6 +162,7 @@ Shared variables:
 - `VOLUST_DEFAULT_RETENTION`: default retention policy for labeled containers that omit `volust.retention`
 - `VOLUST_JOB_IMAGE`: optional image for one-shot job containers, defaults to `ghcr.io/monlor/volust:latest`
 - `VOLUST_INCLUDE_STOPPED_CONTAINERS`: include stopped labeled containers in backup/restore discovery when set to `true`, `1`, `yes`, or `on`; defaults to `false`
+- `VOLUST_STOP_CONTAINERS_BEFORE_BACKUP`: stop running application containers while their backup job runs when set to `true`, `1`, `yes`, or `on`; defaults to `false`
 
 The compose files keep all variables inline so deployment is a single file. Edit the placeholder values before starting.
 
@@ -178,8 +179,9 @@ Optional labels:
 - `volust.sources=/data,/config` defaults to all regular bind and volume mounts, excluding socket and device/system mounts
 - `volust.schedule=0 3 * * *` defaults to `VOLUST_DEFAULT_SCHEDULE`
 - `volust.retention=keep-last=7,keep-daily=7,keep-weekly=4,keep-monthly=6` defaults to `VOLUST_DEFAULT_RETENTION`
+- `volust.stop-before-backup=true|false` overrides `VOLUST_STOP_CONTAINERS_BEFORE_BACKUP` for that application
 
-`volust.enabled=true` only opts a container into discovery. Backup frequency is controlled by `volust.schedule`; if that label is omitted, Volust uses `VOLUST_DEFAULT_SCHEDULE` from the Volust service environment. The daemon refreshes discovered containers every minute and schedules each source with its cron expression. Use `docker exec volust volust backup --app <app-name>` for an immediate application backup outside the schedule, or `docker exec volust volust daemon --once` to scan and back up all discovered applications once.
+`volust.enabled=true` only opts a container into discovery. Backup frequency is controlled by `volust.schedule`; if that label is omitted, Volust uses `VOLUST_DEFAULT_SCHEDULE` from the Volust service environment. Stopping a container during backup is disabled by default; enable it globally with `VOLUST_STOP_CONTAINERS_BEFORE_BACKUP=true`, or override individual applications with `volust.stop-before-backup`. When enabled, Volust stops the running application container before its backup job starts and automatically starts it again after the backup job exits, including when the backup job fails. Restart cleanup uses a hard 2 minute timeout; if backup and restart both fail, both errors are returned or logged by the command/scheduler and the container may require manual intervention. The stop call uses the active command or scheduler context. The application is unavailable for the full stop, backup job, and restart window, so use this mode only when that downtime is acceptable or after putting the application into maintenance mode. The daemon refreshes discovered containers every minute and schedules each source with its cron expression. Use `docker exec volust volust backup --app <app-name>` for an immediate application backup outside the schedule, or `docker exec volust volust daemon --once` to scan and back up all discovered applications once.
 
 When provided, sources must exactly match mounted paths inside the application container. Volust maps each source into a job container at `/volust/sources/<source-id>`.
 

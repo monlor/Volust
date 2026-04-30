@@ -51,6 +51,66 @@ func TestRunOnceCreatesBackupForgetAndPruneJobsPerSource(t *testing.T) {
 	if got := runtime.jobs[2].Operation; got != "prune" {
 		t.Fatalf("third job command = %#v", runtime.jobs[2].Args)
 	}
+	if len(runtime.events) != 3 || runtime.events[0] != "job:backup" || runtime.events[1] != "job:forget" || runtime.events[2] != "job:prune" {
+		t.Fatalf("events = %#v", runtime.events)
+	}
+}
+
+func TestRunOnceStopsRunningContainerWhenGlobalStopBeforeBackupEnabled(t *testing.T) {
+	runtime := &fakeRuntime{
+		containers: []volustdocker.Container{{
+			ID:      "abc",
+			Name:    "/postgres",
+			Running: true,
+			Labels: map[string]string{
+				"volust.enabled":  "true",
+				"volust.profile":  "s3prod",
+				"volust.sources":  "/data",
+				"volust.schedule": "0 3 * * *",
+			},
+			Mounts: []volustdocker.Mount{{Type: "volume", Name: "pgdata", Destination: "/data"}},
+		}},
+	}
+	cfg := config.Config{Profiles: map[string]config.Profile{
+		"s3prod": {Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app", Password: "secret"},
+	}}
+
+	if _, err := RunOnce(context.Background(), cfg, runtime, Options{JobImage: "volust:latest", StopBeforeBackup: true}); err != nil {
+		t.Fatalf("RunOnce returned error: %v", err)
+	}
+	want := []string{"stop:abc", "job:backup", "start:abc", "job:prune"}
+	if !equalStrings(runtime.events, want) {
+		t.Fatalf("events = %#v, want %#v", runtime.events, want)
+	}
+}
+
+func TestRunOnceStopBeforeBackupLabelOverridesGlobalDefault(t *testing.T) {
+	runtime := &fakeRuntime{
+		containers: []volustdocker.Container{{
+			ID:      "abc",
+			Name:    "/postgres",
+			Running: true,
+			Labels: map[string]string{
+				"volust.enabled":            "true",
+				"volust.profile":            "s3prod",
+				"volust.sources":            "/data",
+				"volust.schedule":           "0 3 * * *",
+				"volust.stop-before-backup": "false",
+			},
+			Mounts: []volustdocker.Mount{{Type: "volume", Name: "pgdata", Destination: "/data"}},
+		}},
+	}
+	cfg := config.Config{Profiles: map[string]config.Profile{
+		"s3prod": {Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app", Password: "secret"},
+	}}
+
+	if _, err := RunOnce(context.Background(), cfg, runtime, Options{JobImage: "volust:latest", StopBeforeBackup: true}); err != nil {
+		t.Fatalf("RunOnce returned error: %v", err)
+	}
+	want := []string{"job:backup", "job:prune"}
+	if !equalStrings(runtime.events, want) {
+		t.Fatalf("events = %#v, want %#v", runtime.events, want)
+	}
 }
 
 func TestRunOnceSkipsForgetWhenRetentionIsUnset(t *testing.T) {
@@ -434,6 +494,50 @@ func TestRunSourceJobsSerializesSamePhysicalVolumeAcrossApps(t *testing.T) {
 	}
 }
 
+func TestRunSourceJobsSerializesStopBeforeBackupByContainer(t *testing.T) {
+	runtime := &containerStopRuntime{release: make(chan struct{})}
+	profile := config.Profile{Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app", Password: "secret"}
+	spec := volustdocker.BackupSpec{
+		ContainerID:         "abc",
+		ContainerRunning:    true,
+		Name:                "postgres",
+		Profile:             "s3prod",
+		StopBeforeBackup:    true,
+		StopBeforeBackupSet: true,
+		Sources: []volustdocker.Source{
+			{ID: "data", Type: "volume", VolumeName: "pgdata"},
+			{ID: "config", Type: "volume", VolumeName: "pgconfig"},
+		},
+	}
+
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	for _, source := range spec.Sources {
+		source := source
+		go func() {
+			defer wg.Done()
+			_, err := RunSourceJobs(context.Background(), runtime, Options{JobImage: "volust:latest", StopBeforeBackup: true}, profile, spec, source, false)
+			errs <- err
+		}()
+	}
+	for atomic.LoadInt32(&runtime.started) == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	close(runtime.release)
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("RunSourceJobs returned error: %v", err)
+		}
+	}
+	if got := atomic.LoadInt32(&runtime.stopAttempts); got != 2 {
+		t.Fatalf("stop attempts = %d, want 2", got)
+	}
+}
+
 type lockingRuntime struct {
 	started    int32
 	running    int32
@@ -460,10 +564,52 @@ func (f *lockingRuntime) RunJob(_ context.Context, _ volustdocker.JobSpec) error
 	return nil
 }
 
+func (f *lockingRuntime) StopContainer(context.Context, string) error {
+	return nil
+}
+
+func (f *lockingRuntime) StartContainer(context.Context, string) error {
+	return nil
+}
+
+type containerStopRuntime struct {
+	started      int32
+	stopped      int32
+	stopAttempts int32
+	release      chan struct{}
+}
+
+func (f *containerStopRuntime) ListContainers(_ context.Context, _ volustdocker.ListOptions) ([]volustdocker.Container, error) {
+	return nil, nil
+}
+
+func (f *containerStopRuntime) RunJob(_ context.Context, _ volustdocker.JobSpec) error {
+	if atomic.AddInt32(&f.started, 1) == 1 {
+		<-f.release
+	}
+	return nil
+}
+
+func (f *containerStopRuntime) StopContainer(context.Context, string) error {
+	atomic.AddInt32(&f.stopAttempts, 1)
+	if !atomic.CompareAndSwapInt32(&f.stopped, 0, 1) {
+		return errors.New("container already stopped")
+	}
+	return nil
+}
+
+func (f *containerStopRuntime) StartContainer(context.Context, string) error {
+	if !atomic.CompareAndSwapInt32(&f.stopped, 1, 0) {
+		return errors.New("container was not stopped")
+	}
+	return nil
+}
+
 type fakeRuntime struct {
 	containers      []volustdocker.Container
 	containerSets   [][]volustdocker.Container
 	jobs            []volustdocker.JobSpec
+	events          []string
 	runErr          error
 	listCalls       int
 	onList          func(int)
@@ -488,5 +634,28 @@ func (f *fakeRuntime) ListContainers(_ context.Context, options volustdocker.Lis
 
 func (f *fakeRuntime) RunJob(_ context.Context, job volustdocker.JobSpec) error {
 	f.jobs = append(f.jobs, job)
+	f.events = append(f.events, "job:"+job.Operation)
 	return f.runErr
+}
+
+func (f *fakeRuntime) StopContainer(_ context.Context, id string) error {
+	f.events = append(f.events, "stop:"+id)
+	return nil
+}
+
+func (f *fakeRuntime) StartContainer(_ context.Context, id string) error {
+	f.events = append(f.events, "start:"+id)
+	return nil
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

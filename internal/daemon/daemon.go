@@ -3,6 +3,7 @@ package daemon
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -21,17 +22,20 @@ import (
 type Runtime interface {
 	ListContainers(context.Context, volustdocker.ListOptions) ([]volustdocker.Container, error)
 	RunJob(context.Context, volustdocker.JobSpec) error
+	StopContainer(context.Context, string) error
+	StartContainer(context.Context, string) error
 }
 
 type Options struct {
-	JobImage        string
-	ConfigDir       string
-	ExcludeDir      string
-	LogWriter       io.Writer
-	RefreshInterval time.Duration
-	IncludeStopped  bool
-	AssumeLocked    bool
-	SkipRetention   bool
+	JobImage         string
+	ConfigDir        string
+	ExcludeDir       string
+	LogWriter        io.Writer
+	RefreshInterval  time.Duration
+	IncludeStopped   bool
+	StopBeforeBackup bool
+	AssumeLocked     bool
+	SkipRetention    bool
 }
 
 type Report struct {
@@ -245,12 +249,49 @@ func runSourceJobsLocked(ctx context.Context, runtime Runtime, options Options, 
 		if command.Operation != "backup" {
 			job.Name = fmt.Sprintf("volust-%s-%s", command.Operation, jobName)
 		}
-		if err := runtime.RunJob(ctx, job); err != nil {
-			return jobsStarted, err
+		if command.Operation == "backup" && shouldStopBeforeBackup(options, spec) {
+			if err := runJobWithStoppedContainer(ctx, runtime, spec.ContainerID, job); err != nil {
+				return jobsStarted, err
+			}
+		} else {
+			if err := runtime.RunJob(ctx, job); err != nil {
+				return jobsStarted, err
+			}
 		}
 		jobsStarted++
 	}
 	return jobsStarted, nil
+}
+
+func shouldStopBeforeBackup(options Options, spec volustdocker.BackupSpec) bool {
+	stop := options.StopBeforeBackup
+	if spec.StopBeforeBackupSet {
+		stop = spec.StopBeforeBackup
+	}
+	return stop && spec.ContainerRunning && spec.ContainerID != ""
+}
+
+func runJobWithStoppedContainer(ctx context.Context, runtime Runtime, containerID string, job volustdocker.JobSpec) error {
+	return WithSourceLock(ctx, ContainerLockKey(containerID), func() error {
+		if err := runtime.StopContainer(ctx, containerID); err != nil {
+			return err
+		}
+		jobErr := runtime.RunJob(ctx, job)
+		return restartBackupContainer(containerID, runtime, jobErr)
+	})
+}
+
+func restartBackupContainer(containerID string, runtime Runtime, err error) error {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	startErr := runtime.StartContainer(cleanupCtx, containerID)
+	if err != nil && startErr != nil {
+		return errors.Join(err, startErr)
+	}
+	if err != nil {
+		return err
+	}
+	return startErr
 }
 
 func runPruneJob(ctx context.Context, runtime Runtime, options Options, profile config.Profile, name string) error {

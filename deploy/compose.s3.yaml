@@ -14,5 +14,6 @@ services:
       VOLUST_DEFAULT_RETENTION: "keep-last=7,keep-daily=7,keep-weekly=4,keep-monthly=6"
       VOLUST_JOB_IMAGE: ghcr.io/monlor/volust:latest
       VOLUST_INCLUDE_STOPPED_CONTAINERS: "false"
+      VOLUST_STOP_CONTAINERS_BEFORE_BACKUP: "false"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

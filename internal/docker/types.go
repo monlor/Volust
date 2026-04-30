@@ -40,14 +40,17 @@ type Source struct {
 }
 
 type BackupSpec struct {
-	ContainerID  string
-	Name         string
-	Profile      string
-	Schedule     policy.Schedule
-	Retention    policy.Retention
-	Excludes     []string
-	ExcludeFiles []string
-	Sources      []Source
+	ContainerID         string
+	ContainerRunning    bool
+	Name                string
+	Profile             string
+	Schedule            policy.Schedule
+	Retention           policy.Retention
+	StopBeforeBackup    bool
+	StopBeforeBackupSet bool
+	Excludes            []string
+	ExcludeFiles        []string
+	Sources             []Source
 }
 
 func ParseBackupSpec(container Container, profiles map[string]config.Profile) (BackupSpec, error) {
@@ -82,6 +85,10 @@ func ParseBackupSpecWithDefaults(container Container, profiles map[string]config
 	if err != nil {
 		return BackupSpec{}, err
 	}
+	stopBeforeBackup, stopBeforeBackupSet, err := parseOptionalBool(container.Labels["volust.stop-before-backup"])
+	if err != nil {
+		return BackupSpec{}, fmt.Errorf("volust.stop-before-backup: %w", err)
+	}
 
 	sources, err := resolveSources(sourcePaths, container.Mounts)
 	if err != nil {
@@ -93,14 +100,17 @@ func ParseBackupSpecWithDefaults(container Container, profiles map[string]config
 	}
 
 	return BackupSpec{
-		ContainerID:  container.ID,
-		Name:         name,
-		Profile:      profileName,
-		Schedule:     schedule,
-		Retention:    retention,
-		Excludes:     splitCSV(container.Labels["volust.exclude"]),
-		ExcludeFiles: splitCSV(container.Labels["volust.exclude-file"]),
-		Sources:      sources,
+		ContainerID:         container.ID,
+		ContainerRunning:    container.Running,
+		Name:                name,
+		Profile:             profileName,
+		Schedule:            schedule,
+		Retention:           retention,
+		StopBeforeBackup:    stopBeforeBackup,
+		StopBeforeBackupSet: stopBeforeBackupSet,
+		Excludes:            splitCSV(container.Labels["volust.exclude"]),
+		ExcludeFiles:        splitCSV(container.Labels["volust.exclude-file"]),
+		Sources:             sources,
 	}, nil
 }
 
@@ -148,6 +158,21 @@ func defaultString(value, fallback string) string {
 		return value
 	}
 	return strings.TrimSpace(fallback)
+}
+
+func parseOptionalBool(value string) (bool, bool, error) {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" {
+		return false, false, nil
+	}
+	switch value {
+	case "1", "true", "yes", "on":
+		return true, true, nil
+	case "0", "false", "no", "off":
+		return false, true, nil
+	default:
+		return false, true, fmt.Errorf("must be a boolean value")
+	}
 }
 
 func resolveSources(paths []string, mounts []Mount) ([]Source, error) {
