@@ -504,6 +504,43 @@ func TestRunSnapshotsUsesParameters(t *testing.T) {
 	}
 }
 
+func TestRunSnapshotsReportsInvalidSnapshotOutput(t *testing.T) {
+	path := writeConfig(t)
+	fake := &appFakeRuntime{
+		containers: []volustdocker.Container{{
+			ID:   "abc",
+			Name: "/postgres",
+			Labels: map[string]string{
+				"volust.enabled":  "true",
+				"volust.profile":  "s3prod",
+				"volust.sources":  "/data",
+				"volust.schedule": "0 3 * * *",
+			},
+			Mounts: []volustdocker.Mount{{Type: "volume", Name: "pgdata", Destination: "/data"}},
+		}},
+		snapshotOutput: "rclone backend error: directory not found\n",
+	}
+	oldRuntime := newRuntime
+	newRuntime = func() (daemonRuntime, error) {
+		return fake, nil
+	}
+	defer func() {
+		newRuntime = oldRuntime
+	}()
+
+	var out bytes.Buffer
+	err := Run([]string{"snapshots", "--config", path, "--profile", "s3prod", "--app", "postgres", "--source", "data"}, strings.NewReader(""), &out)
+	if err == nil {
+		t.Fatal("Run succeeded with invalid snapshot output")
+	}
+	got := err.Error()
+	for _, want := range []string{"snapshots output is not valid JSON", "invalid character 'r'", "rclone backend error: directory not found"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("error %q does not contain %q", got, want)
+		}
+	}
+}
+
 func TestRunBackupUsesAppParameterAndBacksUpAllSources(t *testing.T) {
 	path := writeConfig(t)
 	fake := &appFakeRuntime{

@@ -387,7 +387,7 @@ func querySnapshots(ctx context.Context, runtime daemonRuntime, profile config.P
 	}
 	var snapshots []restic.Snapshot
 	if err := json.Unmarshal(output, &snapshots); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("snapshots output is not valid JSON: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return snapshots, nil
 }
