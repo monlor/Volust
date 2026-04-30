@@ -1,8 +1,10 @@
 package config
 
 import (
+	"encoding/base64"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -97,6 +99,113 @@ func TestWebDAVRemoteNameIsSafeForRcloneEnvironmentVariables(t *testing.T) {
 	}
 	if got := profile.Env["RCLONE_CONFIG_VOLUST_PROD_DAV_CN_TYPE"]; got != "webdav" {
 		t.Fatalf("rclone env = %#v", profile.Env)
+	}
+}
+
+func TestLoadDefaultUsesEnvironmentBackedGDriveProfile(t *testing.T) {
+	credentials := `{"type":"service_account","client_email":"volust@example.iam.gserviceaccount.com"}`
+	t.Setenv("VOLUST_PROFILE_TYPE", ProfileGDrive)
+	t.Setenv("VOLUST_GDRIVE_PATH", "restic/repo")
+	t.Setenv("VOLUST_GDRIVE_SERVICE_ACCOUNT_BASE64", base64.StdEncoding.EncodeToString([]byte(credentials)))
+	t.Setenv("VOLUST_GDRIVE_ROOT_FOLDER_ID", "root-folder")
+	t.Setenv("VOLUST_GDRIVE_TEAM_DRIVE", "shared-drive")
+	t.Setenv("RESTIC_PASSWORD", "secret")
+
+	cfg, err := LoadDefault("")
+	if err != nil {
+		t.Fatalf("LoadDefault returned error: %v", err)
+	}
+
+	profile := cfg.Profiles["default"]
+	if got := profile.Type; got != ProfileGDrive {
+		t.Fatalf("type = %q", got)
+	}
+	if got := profile.RepositoryString(); got != "rclone:volust_default:restic/repo" {
+		t.Fatalf("repository = %q", got)
+	}
+	if got := profile.Env["RCLONE_CONFIG_VOLUST_DEFAULT_TYPE"]; got != "drive" {
+		t.Fatalf("rclone type = %q", got)
+	}
+	if got := profile.Env["RCLONE_CONFIG_VOLUST_DEFAULT_SCOPE"]; got != "drive" {
+		t.Fatalf("rclone scope = %q", got)
+	}
+	if got := profile.Env["RCLONE_CONFIG_VOLUST_DEFAULT_SERVICE_ACCOUNT_CREDENTIALS"]; got != credentials {
+		t.Fatalf("service account credentials = %q", got)
+	}
+	if got := profile.Env["RCLONE_CONFIG_VOLUST_DEFAULT_ROOT_FOLDER_ID"]; got != "root-folder" {
+		t.Fatalf("root folder id = %q", got)
+	}
+	if got := profile.Env["RCLONE_CONFIG_VOLUST_DEFAULT_TEAM_DRIVE"]; got != "shared-drive" {
+		t.Fatalf("team drive = %q", got)
+	}
+	if got := profile.Env["RCLONE_CONFIG_VOLUST_DEFAULT_USE_TRASH"]; got != "false" {
+		t.Fatalf("use trash = %q", got)
+	}
+}
+
+func TestLoadBuildsGDriveProfileFromConfig(t *testing.T) {
+	credentials := `{"type":"service_account","client_email":"volust@example.iam.gserviceaccount.com"}`
+	t.Setenv("GDRIVE_CREDS", base64.StdEncoding.EncodeToString([]byte(credentials)))
+	path := writeConfig(t, `
+profiles:
+  drive-prod:
+    type: gdrive
+    path: backups
+    password: secret
+    gdrive:
+      service_account_base64: ${GDRIVE_CREDS}
+      root_folder_id: folder-id
+      use_trash: true
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	profile := cfg.Profiles["drive-prod"]
+	if got := profile.RepositoryString(); got != "rclone:volust_drive_prod:backups" {
+		t.Fatalf("repository = %q", got)
+	}
+	if got := profile.Env["RCLONE_CONFIG_VOLUST_DRIVE_PROD_TYPE"]; got != "drive" {
+		t.Fatalf("rclone type = %q", got)
+	}
+	if got := profile.Env["RCLONE_CONFIG_VOLUST_DRIVE_PROD_SERVICE_ACCOUNT_CREDENTIALS"]; got != credentials {
+		t.Fatalf("service account credentials = %q", got)
+	}
+	if got := profile.Env["RCLONE_CONFIG_VOLUST_DRIVE_PROD_ROOT_FOLDER_ID"]; got != "folder-id" {
+		t.Fatalf("root folder id = %q", got)
+	}
+	if got := profile.Env["RCLONE_CONFIG_VOLUST_DRIVE_PROD_USE_TRASH"]; got != "true" {
+		t.Fatalf("use trash = %q", got)
+	}
+}
+
+func TestLoadRejectsInvalidGDriveServiceAccountBase64(t *testing.T) {
+	t.Setenv("VOLUST_PROFILE_TYPE", ProfileGDrive)
+	t.Setenv("VOLUST_GDRIVE_SERVICE_ACCOUNT_BASE64", "not base64")
+	t.Setenv("RESTIC_PASSWORD", "secret")
+
+	_, err := LoadDefault("")
+	if err == nil {
+		t.Fatal("LoadDefault succeeded with invalid gdrive service account base64")
+	}
+	if !strings.Contains(err.Error(), "service account base64") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestLoadRejectsInvalidGDriveServiceAccountJSON(t *testing.T) {
+	t.Setenv("VOLUST_PROFILE_TYPE", ProfileGDrive)
+	t.Setenv("VOLUST_GDRIVE_SERVICE_ACCOUNT_BASE64", base64.StdEncoding.EncodeToString([]byte("not json")))
+	t.Setenv("RESTIC_PASSWORD", "secret")
+
+	_, err := LoadDefault("")
+	if err == nil {
+		t.Fatal("LoadDefault succeeded with invalid gdrive service account JSON")
+	}
+	if !strings.Contains(err.Error(), "service account json") {
+		t.Fatalf("error = %v", err)
 	}
 }
 
