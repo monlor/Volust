@@ -1,0 +1,20 @@
+services:
+  volust:
+    container_name: volust
+    image: ghcr.io/monlor/volust:latest
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      VOLUST_PROFILE_TYPE: webdav
+      VOLUST_WEBDAV_PATH: volust
+      VOLUST_WEBDAV_URL: https://dav.example.com/backups
+      VOLUST_WEBDAV_USER: alice
+      VOLUST_WEBDAV_PASS: change-me
+      VOLUST_WEBDAV_VENDOR: other
+      RESTIC_PASSWORD: change-me
+      VOLUST_DEFAULT_SCHEDULE: "0 3 * * *"
+      VOLUST_DEFAULT_RETENTION: "keep-last=7,keep-daily=7,keep-weekly=4,keep-monthly=6"
+      VOLUST_JOB_IMAGE: ghcr.io/monlor/volust:latest
+      VOLUST_INCLUDE_STOPPED_CONTAINERS: "false"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

@@ -1,0 +1,28 @@
+# Local build outputs
+/volust
+/bin/
+/dist/
+/build/
+*.test
+*.out
+*.prof
+coverage.*
+
+# Go workspace/cache files
+/vendor/
+go.work
+go.work.sum
+
+# Local runtime/config secrets
+.env
+.env.*
+!.env.example
+config.yaml
+config.yml
+
+# OS/editor noise
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/

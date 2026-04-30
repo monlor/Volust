@@ -1,0 +1,119 @@
+name: Docker
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: ghcr.io/monlor/volust
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run tests
+        run: go test ./...
+
+  build:
+    name: Build ${{ matrix.platform }}
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            arch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ env.IMAGE_NAME }}:${{ github.sha }}-${{ matrix.arch }}
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+
+  manifest:
+    name: Publish multi-arch manifest
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish commit manifest
+        run: |
+          docker buildx imagetools create \
+            --tag "$IMAGE_NAME:${GITHUB_SHA}" \
+            "$IMAGE_NAME:${GITHUB_SHA}-amd64" \
+            "$IMAGE_NAME:${GITHUB_SHA}-arm64"
+
+      - name: Publish latest manifest
+        if: github.ref == 'refs/heads/main'
+        run: |
+          docker buildx imagetools create \
+            --tag "$IMAGE_NAME:latest" \
+            "$IMAGE_NAME:${GITHUB_SHA}-amd64" \
+            "$IMAGE_NAME:${GITHUB_SHA}-arm64"
+
+      - name: Publish version manifest
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          docker buildx imagetools create \
+            --tag "$IMAGE_NAME:${GITHUB_REF_NAME}" \
+            --tag "$IMAGE_NAME:${version}" \
+            "$IMAGE_NAME:${GITHUB_SHA}-amd64" \
+            "$IMAGE_NAME:${GITHUB_SHA}-arm64"
