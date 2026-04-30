@@ -134,6 +134,44 @@ func TestRunJobCreatesContainerWithUniqueName(t *testing.T) {
 	}
 }
 
+func TestRunJobOutputCapturesOnlyStdoutOnSuccess(t *testing.T) {
+	var logsQuery string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/containers/create"):
+			_ = json.NewEncoder(w).Encode(dockerCreateResponse{ID: "job123"})
+		case r.Method == http.MethodPost && r.URL.Path == "/containers/job123/start":
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && r.URL.Path == "/containers/job123/wait":
+			_ = json.NewEncoder(w).Encode(dockerWaitResponse{StatusCode: 0})
+		case r.Method == http.MethodGet && r.URL.Path == "/containers/job123/logs":
+			logsQuery = r.URL.RawQuery
+			_, _ = w.Write([]byte(`[{"id":"snap"}]`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/containers/job123":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected docker API call: %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	runtime := &Runtime{client: server.Client(), host: server.URL}
+	output, err := runtime.RunJobOutput(context.Background(), JobSpec{
+		Name:  "snapshots",
+		Image: "volust:latest",
+		Args:  []string{"restic", "snapshots", "--json"},
+	})
+	if err != nil {
+		t.Fatalf("RunJobOutput returned error: %v", err)
+	}
+	if string(output) != `[{"id":"snap"}]` {
+		t.Fatalf("RunJobOutput output = %q", output)
+	}
+	if !strings.Contains(logsQuery, "stdout=1") || strings.Contains(logsQuery, "stderr=1") {
+		t.Fatalf("logs query = %q", logsQuery)
+	}
+}
+
 func TestDemuxDockerLogsSupportsRawAndFramedOutput(t *testing.T) {
 	if got := string(demuxDockerLogs([]byte("plain\n"))); got != "plain\n" {
 		t.Fatalf("raw logs = %q", got)

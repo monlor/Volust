@@ -119,7 +119,7 @@ func (r *Runtime) runJob(ctx context.Context, job JobSpec, captureOutput bool) (
 	if !captureOutput {
 		return nil, nil
 	}
-	logs, err := r.raw(ctx, http.MethodGet, r.host+"/containers/"+created.ID+"/logs?stdout=1&stderr=1", nil)
+	logs, err := r.raw(ctx, http.MethodGet, r.host+"/containers/"+created.ID+"/logs?stdout=1&stderr=0", nil)
 	if err != nil {
 		return nil, err
 	}
