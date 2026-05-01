@@ -126,14 +126,6 @@ vi compose.webdav.yaml
 docker compose -f compose.webdav.yaml up -d
 ```
 
-Google Drive service account:
-
-```bash
-cd deploy
-vi compose.gdrive.yaml
-docker compose -f compose.gdrive.yaml up -d
-```
-
 Manual scan and restore are the same for compose deployments:
 
 ```bash
@@ -162,24 +154,6 @@ WebDAV variables:
 - `VOLUST_WEBDAV_PASS`: WebDAV password
 - `VOLUST_WEBDAV_VENDOR`: optional rclone vendor, usually `other`
 - `RESTIC_PASSWORD`: restic repository password
-
-Google Drive service account variables:
-
-- `VOLUST_PROFILE_TYPE=gdrive`
-- `VOLUST_GDRIVE_PATH`: repository path inside the Google Drive remote, defaults to `volust`
-- `VOLUST_GDRIVE_SERVICE_ACCOUNT_BASE64`: base64 encoded service account JSON
-- `VOLUST_GDRIVE_ROOT_FOLDER_ID`: optional Google Drive folder ID
-- `VOLUST_GDRIVE_TEAM_DRIVE`: optional Shared Drive ID
-- `VOLUST_GDRIVE_USE_TRASH`: optional rclone Drive trash behavior, defaults to `false`
-- `RESTIC_PASSWORD`: restic repository password
-
-Create the base64 value from the service account JSON file:
-
-```bash
-base64 -i service-account.json | tr -d '\n'
-```
-
-Share the target Google Drive folder with the service account `client_email` before running backups, or set `VOLUST_GDRIVE_TEAM_DRIVE` when using a Shared Drive. Volust decodes the base64 JSON in memory and passes it to rclone as remote environment configuration.
 
 Shared variables:
 

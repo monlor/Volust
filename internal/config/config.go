@@ -1,8 +1,6 @@
 package config
 
 import (
-	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -19,7 +17,6 @@ var obscurePassword = rcloneObscurePassword
 const (
 	ProfileS3     = "s3"
 	ProfileWebDAV = "webdav"
-	ProfileGDrive = "gdrive"
 )
 
 type Config struct {
@@ -39,7 +36,6 @@ type Profile struct {
 	Password   string            `yaml:"password"`
 	Env        map[string]string `yaml:"env"`
 	WebDAV     WebDAVConfig      `yaml:"webdav"`
-	GDrive     GDriveConfig      `yaml:"gdrive"`
 	remoteName string
 }
 
@@ -48,14 +44,6 @@ type WebDAVConfig struct {
 	User   string `yaml:"user"`
 	Pass   string `yaml:"pass"`
 	Vendor string `yaml:"vendor"`
-}
-
-type GDriveConfig struct {
-	ServiceAccountBase64 string `yaml:"service_account_base64"`
-	RootFolderID         string `yaml:"root_folder_id"`
-	TeamDrive            string `yaml:"team_drive"`
-	UseTrash             string `yaml:"use_trash"`
-	decodedCredentials   string
 }
 
 func LoadDefault(path string) (Config, error) {
@@ -104,10 +92,6 @@ func (p *Profile) expandEnvRefs() {
 	p.WebDAV.User = expandEnvRefs(p.WebDAV.User)
 	p.WebDAV.Pass = expandEnvRefs(p.WebDAV.Pass)
 	p.WebDAV.Vendor = expandEnvRefs(p.WebDAV.Vendor)
-	p.GDrive.ServiceAccountBase64 = expandEnvRefs(p.GDrive.ServiceAccountBase64)
-	p.GDrive.RootFolderID = expandEnvRefs(p.GDrive.RootFolderID)
-	p.GDrive.TeamDrive = expandEnvRefs(p.GDrive.TeamDrive)
-	p.GDrive.UseTrash = expandEnvRefs(p.GDrive.UseTrash)
 }
 
 func expandEnvRefs(input string) string {
@@ -140,14 +124,6 @@ func FromEnv() (Config, error) {
 			Pass:   os.Getenv("VOLUST_WEBDAV_PASS"),
 			Vendor: os.Getenv("VOLUST_WEBDAV_VENDOR"),
 		}
-	case ProfileGDrive:
-		profile.Path = envDefault("VOLUST_GDRIVE_PATH", "volust")
-		profile.GDrive = GDriveConfig{
-			ServiceAccountBase64: os.Getenv("VOLUST_GDRIVE_SERVICE_ACCOUNT_BASE64"),
-			RootFolderID:         os.Getenv("VOLUST_GDRIVE_ROOT_FOLDER_ID"),
-			TeamDrive:            os.Getenv("VOLUST_GDRIVE_TEAM_DRIVE"),
-			UseTrash:             os.Getenv("VOLUST_GDRIVE_USE_TRASH"),
-		}
 	default:
 		return Config{}, fmt.Errorf("unsupported profile type %q", profileType)
 	}
@@ -173,7 +149,7 @@ func (c *Config) applyEnvDefaults() {
 
 func (p Profile) RepositoryString() string {
 	switch p.Type {
-	case ProfileWebDAV, ProfileGDrive:
+	case ProfileWebDAV:
 		return "rclone:" + p.rcloneRemoteName() + ":" + strings.TrimPrefix(p.Path, "/")
 	default:
 		return p.Repository
@@ -210,13 +186,6 @@ func (p Profile) validate(name string) error {
 		if p.WebDAV.URL == "" {
 			return fmt.Errorf("profile %q: webdav.url is required", name)
 		}
-	case ProfileGDrive:
-		if p.Path == "" {
-			return fmt.Errorf("profile %q: path is required for gdrive", name)
-		}
-		if p.GDrive.ServiceAccountBase64 == "" {
-			return fmt.Errorf("profile %q: gdrive.service_account_base64 is required", name)
-		}
 	default:
 		return fmt.Errorf("profile %q: unsupported type %q", name, p.Type)
 	}
@@ -242,8 +211,6 @@ func (p *Profile) normalize(name string) error {
 	switch p.Type {
 	case ProfileWebDAV:
 		return p.normalizeWebDAV(name)
-	case ProfileGDrive:
-		return p.normalizeGDrive(name)
 	default:
 		return nil
 	}
@@ -271,43 +238,6 @@ func (p *Profile) normalizeWebDAV(name string) error {
 	}
 	p.Env["RCLONE_CONFIG_"+remote+"_VENDOR"] = vendor
 	return nil
-}
-
-func (p *Profile) normalizeGDrive(name string) error {
-	p.remoteName = "volust_" + rcloneSafeName(name)
-	credentials, err := decodeServiceAccountCredentials(p.GDrive.ServiceAccountBase64)
-	if err != nil {
-		return fmt.Errorf("profile %q: %w", name, err)
-	}
-	p.GDrive.decodedCredentials = credentials
-
-	remote := strings.ToUpper(p.rcloneRemoteName())
-	p.Env["RCLONE_CONFIG_"+remote+"_TYPE"] = "drive"
-	p.Env["RCLONE_CONFIG_"+remote+"_SCOPE"] = "drive"
-	p.Env["RCLONE_CONFIG_"+remote+"_SERVICE_ACCOUNT_CREDENTIALS"] = credentials
-	if p.GDrive.RootFolderID != "" {
-		p.Env["RCLONE_CONFIG_"+remote+"_ROOT_FOLDER_ID"] = p.GDrive.RootFolderID
-	}
-	if p.GDrive.TeamDrive != "" {
-		p.Env["RCLONE_CONFIG_"+remote+"_TEAM_DRIVE"] = p.GDrive.TeamDrive
-	}
-	useTrash := p.GDrive.UseTrash
-	if useTrash == "" {
-		useTrash = "false"
-	}
-	p.Env["RCLONE_CONFIG_"+remote+"_USE_TRASH"] = useTrash
-	return nil
-}
-
-func decodeServiceAccountCredentials(encoded string) (string, error) {
-	body, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil {
-		return "", fmt.Errorf("decode gdrive service account base64: %w", err)
-	}
-	if !json.Valid(body) {
-		return "", fmt.Errorf("gdrive service account json is invalid")
-	}
-	return string(body), nil
 }
 
 func rcloneObscurePassword(value string) (string, error) {
