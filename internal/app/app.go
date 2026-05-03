@@ -256,21 +256,24 @@ func runRestore(args []string, in io.Reader, out io.Writer) error {
 		return errors.New("restore confirmation phrase did not match")
 	}
 
-	err = daemon.WithSourceLock(ctx, daemon.SourceLockKey(*profile, selected.Spec, selected.Source), func() error {
-		resolvedSnapshot, err := resolveSnapshot(ctx, runtime, cfg.Profiles[*profile], restic.RestoreRequest{
-			SnapshotID: *snapshot,
-			App:        *appName,
-			Profile:    *profile,
-			SourceID:   *source,
+	profileCfg := cfg.Profiles[*profile]
+	err = daemon.WithSourceLock(ctx, daemon.RepositoryLockKey(profileCfg), func() error {
+		return daemon.WithSourceLock(ctx, daemon.SourceLockKey(*profile, selected.Spec, selected.Source), func() error {
+			resolvedSnapshot, err := resolveSnapshot(ctx, runtime, profileCfg, restic.RestoreRequest{
+				SnapshotID: *snapshot,
+				App:        *appName,
+				Profile:    *profile,
+				SourceID:   *source,
+			})
+			if err != nil {
+				return err
+			}
+			stopped, err := stopMountedContainers(ctx, runtime, selected)
+			if err != nil {
+				return err
+			}
+			return restoreWithStoppedContainers(ctx, runtime, cfg, *profile, *appName, *source, resolvedSnapshot, *skipPreBackup, selected, stopped)
 		})
-		if err != nil {
-			return err
-		}
-		stopped, err := stopMountedContainers(ctx, runtime, selected)
-		if err != nil {
-			return err
-		}
-		return restoreWithStoppedContainers(ctx, runtime, cfg, *profile, *appName, *source, resolvedSnapshot, *skipPreBackup, selected, stopped)
 	})
 	if err != nil {
 		return err

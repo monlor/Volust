@@ -235,6 +235,37 @@ func TestRunOncePrunesOncePerProfile(t *testing.T) {
 	}
 }
 
+func TestRunPruneJobSerializesOnRepository(t *testing.T) {
+	runtime := &lockingRuntime{release: make(chan struct{})}
+	profile := config.Profile{Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app", Password: "secret"}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if err := runPruneJob(context.Background(), runtime, Options{JobImage: "volust:latest"}, profile, "postgres"); err != nil {
+			t.Errorf("runPruneJob A returned error: %v", err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if err := runPruneJob(context.Background(), runtime, Options{JobImage: "volust:latest"}, profile, "redis"); err != nil {
+			t.Errorf("runPruneJob B returned error: %v", err)
+		}
+	}()
+	for atomic.LoadInt32(&runtime.started) == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	if got := atomic.LoadInt32(&runtime.maxRunning); got != 1 {
+		t.Fatalf("prune jobs overlapped before release, maxRunning=%d", got)
+	}
+	close(runtime.release)
+	wg.Wait()
+	if got := atomic.LoadInt32(&runtime.maxRunning); got != 1 {
+		t.Fatalf("prune jobs overlapped, maxRunning=%d", got)
+	}
+}
+
 func TestRunSchedulerLogsSourceJobFailures(t *testing.T) {
 	runtime := &fakeRuntime{
 		containers: []volustdocker.Container{{
@@ -491,6 +522,152 @@ func TestRunSourceJobsSerializesSamePhysicalVolumeAcrossApps(t *testing.T) {
 	wg.Wait()
 	if got := atomic.LoadInt32(&runtime.maxRunning); got != 1 {
 		t.Fatalf("jobs overlapped, maxRunning=%d", got)
+	}
+}
+
+func TestRunSourceJobsSerializesSameRepositoryAcrossSources(t *testing.T) {
+	runtime := &lockingRuntime{release: make(chan struct{})}
+	profile := config.Profile{Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app", Password: "secret"}
+	specA := volustdocker.BackupSpec{
+		Name:    "postgres",
+		Profile: "s3prod",
+		Sources: []volustdocker.Source{{
+			ID:         "data",
+			Type:       "volume",
+			VolumeName: "pgdata",
+		}},
+	}
+	specB := volustdocker.BackupSpec{
+		Name:    "redis",
+		Profile: "s3prod",
+		Sources: []volustdocker.Source{{
+			ID:         "data",
+			Type:       "volume",
+			VolumeName: "redisdata",
+		}},
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if _, err := RunSourceJobs(context.Background(), runtime, Options{JobImage: "volust:latest"}, profile, specA, specA.Sources[0], false); err != nil {
+			t.Errorf("RunSourceJobs A returned error: %v", err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if _, err := RunSourceJobs(context.Background(), runtime, Options{JobImage: "volust:latest"}, profile, specB, specB.Sources[0], false); err != nil {
+			t.Errorf("RunSourceJobs B returned error: %v", err)
+		}
+	}()
+	for atomic.LoadInt32(&runtime.started) == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	if got := atomic.LoadInt32(&runtime.maxRunning); got != 1 {
+		t.Fatalf("jobs overlapped before release, maxRunning=%d", got)
+	}
+	close(runtime.release)
+	wg.Wait()
+	if got := atomic.LoadInt32(&runtime.maxRunning); got != 1 {
+		t.Fatalf("jobs overlapped, maxRunning=%d", got)
+	}
+}
+
+func TestRunSourceJobsAllowsDifferentRepositoriesToRunConcurrently(t *testing.T) {
+	runtime := &lockingRuntime{release: make(chan struct{})}
+	profileA := config.Profile{Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app-a", Password: "secret"}
+	profileB := config.Profile{Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app-b", Password: "secret"}
+	specA := volustdocker.BackupSpec{
+		Name:    "postgres",
+		Profile: "s3prod-a",
+		Sources: []volustdocker.Source{{
+			ID:         "data",
+			Type:       "volume",
+			VolumeName: "pgdata",
+		}},
+	}
+	specB := volustdocker.BackupSpec{
+		Name:    "redis",
+		Profile: "s3prod-b",
+		Sources: []volustdocker.Source{{
+			ID:         "data",
+			Type:       "volume",
+			VolumeName: "redisdata",
+		}},
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if _, err := RunSourceJobs(context.Background(), runtime, Options{JobImage: "volust:latest"}, profileA, specA, specA.Sources[0], false); err != nil {
+			t.Errorf("RunSourceJobs A returned error: %v", err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if _, err := RunSourceJobs(context.Background(), runtime, Options{JobImage: "volust:latest"}, profileB, specB, specB.Sources[0], false); err != nil {
+			t.Errorf("RunSourceJobs B returned error: %v", err)
+		}
+	}()
+	deadline := time.After(time.Second)
+	for atomic.LoadInt32(&runtime.started) < 2 {
+		select {
+		case <-deadline:
+			close(runtime.release)
+			wg.Wait()
+			t.Fatalf("second repository job did not start concurrently, started=%d maxRunning=%d", atomic.LoadInt32(&runtime.started), atomic.LoadInt32(&runtime.maxRunning))
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	close(runtime.release)
+	wg.Wait()
+	if got := atomic.LoadInt32(&runtime.maxRunning); got != 2 {
+		t.Fatalf("different repository jobs did not overlap, maxRunning=%d", got)
+	}
+}
+
+func TestRepositoryLockKeyUsesWebDAVEndpointInsteadOfProfileAlias(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	body := []byte(`
+profiles:
+  dav-a:
+    type: webdav
+    path: backups
+    password: secret
+    webdav:
+      url: https://dav.example.com/remote.php/dav/files/alice
+  dav-b:
+    type: webdav
+    path: backups
+    password: secret
+    webdav:
+      url: https://dav.example.com/remote.php/dav/files/alice
+  dav-c:
+    type: webdav
+    path: other
+    password: secret
+    webdav:
+      url: https://dav.example.com/remote.php/dav/files/alice
+`)
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	keyA := RepositoryLockKey(cfg.Profiles["dav-a"])
+	keyB := RepositoryLockKey(cfg.Profiles["dav-b"])
+	keyC := RepositoryLockKey(cfg.Profiles["dav-c"])
+	if keyA != keyB {
+		t.Fatalf("same WebDAV endpoint should share repository lock: %q != %q", keyA, keyB)
+	}
+	if keyA == keyC {
+		t.Fatalf("different WebDAV paths should not share repository lock: %q", keyA)
 	}
 }
 

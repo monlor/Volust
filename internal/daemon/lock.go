@@ -6,10 +6,12 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/monlor/volust/internal/config"
 	volustdocker "github.com/monlor/volust/internal/docker"
 )
 
@@ -33,6 +35,13 @@ func SourceLockKey(profile string, spec volustdocker.BackupSpec, source volustdo
 		return "bind\x00" + source.HostSource
 	}
 	return profile + "\x00" + spec.Name + "\x00" + source.ID
+}
+
+func RepositoryLockKey(profile config.Profile) string {
+	if profile.Type == config.ProfileWebDAV {
+		return "repo\x00webdav\x00" + strings.TrimRight(profile.WebDAV.URL, "/") + "\x00" + strings.Trim(profile.Path, "/")
+	}
+	return "repo\x00" + profile.RepositoryString()
 }
 
 func ContainerLockKey(containerID string) string {

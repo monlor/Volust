@@ -203,10 +203,12 @@ func runScheduledSourceJobs(ctx context.Context, runtime Runtime, options Option
 func RunSourceJobs(ctx context.Context, runtime Runtime, options Options, profile config.Profile, spec volustdocker.BackupSpec, source volustdocker.Source, includePrune bool) (int, error) {
 	if !options.AssumeLocked {
 		var jobsStarted int
-		err := WithSourceLock(ctx, SourceLockKey(spec.Profile, spec, source), func() error {
-			var err error
-			jobsStarted, err = runSourceJobsLocked(ctx, runtime, options, profile, spec, source, includePrune)
-			return err
+		err := WithSourceLock(ctx, RepositoryLockKey(profile), func() error {
+			return WithSourceLock(ctx, SourceLockKey(spec.Profile, spec, source), func() error {
+				var err error
+				jobsStarted, err = runSourceJobsLocked(ctx, runtime, options, profile, spec, source, includePrune)
+				return err
+			})
 		})
 		return jobsStarted, err
 	}
@@ -303,7 +305,9 @@ func runPruneJob(ctx context.Context, runtime Runtime, options Options, profile 
 		Args:      command.Args,
 		Env:       command.Env,
 	}
-	return runtime.RunJob(ctx, job)
+	return WithSourceLock(ctx, RepositoryLockKey(profile), func() error {
+		return runtime.RunJob(ctx, job)
+	})
 }
 
 func LoadExcludeFiles(excludeDir string, spec *volustdocker.BackupSpec) error {
