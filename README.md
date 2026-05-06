@@ -35,6 +35,7 @@ docker run -d \
   -e AWS_DEFAULT_REGION="$AWS_DEFAULT_REGION" \
   -e 'VOLUST_DEFAULT_SCHEDULE=0 3 * * *' \
   -e VOLUST_DEFAULT_RETENTION=keep-last=7,keep-daily=7,keep-weekly=4,keep-monthly=6 \
+  -e VOLUST_MAX_CONCURRENT_WRITES=4 \
   ghcr.io/monlor/volust:latest
 ```
 
@@ -163,6 +164,9 @@ Shared variables:
 - `VOLUST_JOB_IMAGE`: optional image for one-shot job containers, defaults to `ghcr.io/monlor/volust:latest`
 - `VOLUST_INCLUDE_STOPPED_CONTAINERS`: include stopped labeled containers in backup/restore discovery when set to `true`, `1`, `yes`, or `on`; defaults to `false`
 - `VOLUST_STOP_CONTAINERS_BEFORE_BACKUP`: stop running application containers while their backup job runs when set to `true`, `1`, `yes`, or `on`; defaults to `false`
+- `VOLUST_MAX_CONCURRENT_WRITES`: maximum concurrent restic write jobs across repositories on the same Volust host/container, defaults to `4`; set to `0` to disable the global limit. Backup, forget, prune, and restore consume write slots. Snapshot listing stays read-only and does not consume a slot.
+
+Jobs that use the same restic repository are still queued and run one at a time, while different repositories can run concurrently up to `VOLUST_MAX_CONCURRENT_WRITES`. Manual commands started with `docker exec volust volust backup` or `docker exec volust volust restore` share the same local write slots with daemon jobs. The global limit does not remove stale restic locks; clear stale backend locks with `restic unlock` after confirming no backup is running.
 
 The compose files keep all variables inline so deployment is a single file. Edit the placeholder values before starting.
 

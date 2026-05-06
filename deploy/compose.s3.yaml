@@ -15,5 +15,6 @@ services:
       VOLUST_JOB_IMAGE: ghcr.io/monlor/volust:latest
       VOLUST_INCLUDE_STOPPED_CONTAINERS: "false"
       VOLUST_STOP_CONTAINERS_BEFORE_BACKUP: "false"
+      VOLUST_MAX_CONCURRENT_WRITES: "4"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

@@ -54,6 +54,49 @@ func TestRunDaemonOnceUsesEnvironmentConfigByDefault(t *testing.T) {
 	}
 }
 
+func TestMaxConcurrentWritesDefaultsToFour(t *testing.T) {
+	limiter, err := maxConcurrentWritesLimiter()
+	if err != nil {
+		t.Fatalf("maxConcurrentWritesLimiter returned error: %v", err)
+	}
+	if got := limiter.Capacity(); got != 4 {
+		t.Fatalf("capacity = %d, want 4", got)
+	}
+}
+
+func TestMaxConcurrentWritesReadsEnvironment(t *testing.T) {
+	t.Setenv("VOLUST_MAX_CONCURRENT_WRITES", "2")
+	limiter, err := maxConcurrentWritesLimiter()
+	if err != nil {
+		t.Fatalf("maxConcurrentWritesLimiter returned error: %v", err)
+	}
+	if got := limiter.Capacity(); got != 2 {
+		t.Fatalf("capacity = %d, want 2", got)
+	}
+}
+
+func TestMaxConcurrentWritesZeroDisablesLimit(t *testing.T) {
+	t.Setenv("VOLUST_MAX_CONCURRENT_WRITES", "0")
+	limiter, err := maxConcurrentWritesLimiter()
+	if err != nil {
+		t.Fatalf("maxConcurrentWritesLimiter returned error: %v", err)
+	}
+	if got := limiter.Capacity(); got != 0 {
+		t.Fatalf("capacity = %d, want 0", got)
+	}
+}
+
+func TestMaxConcurrentWritesRejectsInvalidEnvironment(t *testing.T) {
+	t.Setenv("VOLUST_MAX_CONCURRENT_WRITES", "abc")
+	if _, err := maxConcurrentWritesLimiter(); err == nil || !strings.Contains(err.Error(), "VOLUST_MAX_CONCURRENT_WRITES") {
+		t.Fatalf("error = %v, want VOLUST_MAX_CONCURRENT_WRITES parse error", err)
+	}
+	t.Setenv("VOLUST_MAX_CONCURRENT_WRITES", "-1")
+	if _, err := maxConcurrentWritesLimiter(); err == nil || !strings.Contains(err.Error(), "must be >= 0") {
+		t.Fatalf("error = %v, want non-negative validation error", err)
+	}
+}
+
 func TestRunRestoreRequiresConfirmationPhrase(t *testing.T) {
 	path := writeConfig(t)
 	var out bytes.Buffer
@@ -361,6 +404,42 @@ func TestRunRestoreRestartsStoppedContainersWhenRestoreJobFails(t *testing.T) {
 	}
 }
 
+func TestRunRestoreWithMaxConcurrentWritesOneDoesNotDeadlockPreBackup(t *testing.T) {
+	t.Setenv("VOLUST_MAX_CONCURRENT_WRITES", "1")
+	path := writeConfig(t)
+	fake := &appFakeRuntime{
+		containers: []volustdocker.Container{{
+			ID:      "abc",
+			Name:    "/postgres",
+			Running: true,
+			Labels: map[string]string{
+				"volust.enabled":   "true",
+				"volust.profile":   "s3prod",
+				"volust.sources":   "/data",
+				"volust.schedule":  "0 3 * * *",
+				"volust.retention": "keep-last=1",
+			},
+			Mounts: []volustdocker.Mount{{Type: "volume", Name: "pgdata", Destination: "/data"}},
+		}},
+	}
+	oldRuntime := newRuntime
+	newRuntime = func() (daemonRuntime, error) {
+		return fake, nil
+	}
+	defer func() {
+		newRuntime = oldRuntime
+	}()
+
+	var out bytes.Buffer
+	err := Run([]string{"restore", "--config", path, "--profile", "s3prod", "--app", "postgres", "--source", "data"}, strings.NewReader("RESTORE postgres/data\n"), &out)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if !equalStrings(fake.events, []string{"job:snapshots", "stop:abc", "job:backup", "job:restore", "start:abc"}) {
+		t.Fatalf("events = %#v", fake.events)
+	}
+}
+
 func TestRestartContainersUsesCleanupContextAfterCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -611,10 +690,10 @@ func TestRunBackupUsesAppParameterAndBacksUpAllSources(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
-	if !equalStrings(fake.events, []string{"job:backup", "job:forget", "job:prune", "job:backup", "job:forget", "job:prune"}) {
+	if !equalStrings(fake.events, []string{"job:backup", "job:forget", "job:backup", "job:forget", "job:prune"}) {
 		t.Fatalf("events = %#v", fake.events)
 	}
-	if !strings.Contains(out.String(), "backup complete: app=postgres sources=2 jobs_started=6") {
+	if !strings.Contains(out.String(), "backup complete: app=postgres sources=2 jobs_started=5") {
 		t.Fatalf("backup output = %q", out.String())
 	}
 }

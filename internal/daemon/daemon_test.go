@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -629,6 +630,215 @@ func TestRunSourceJobsAllowsDifferentRepositoriesToRunConcurrently(t *testing.T)
 	}
 }
 
+func TestRunSourceJobsLimitsGlobalWritesAcrossRepositories(t *testing.T) {
+	runtime := &lockingRuntime{release: make(chan struct{})}
+	limiter := NewWriteLimiter(2)
+	profiles := []config.Profile{
+		{Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app-a", Password: "secret"},
+		{Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app-b", Password: "secret"},
+		{Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app-c", Password: "secret"},
+	}
+	specs := []volustdocker.BackupSpec{
+		{Name: "postgres", Profile: "s3prod-a", Sources: []volustdocker.Source{{ID: "data", Type: "volume", VolumeName: "pgdata"}}},
+		{Name: "redis", Profile: "s3prod-b", Sources: []volustdocker.Source{{ID: "data", Type: "volume", VolumeName: "redisdata"}}},
+		{Name: "memos", Profile: "s3prod-c", Sources: []volustdocker.Source{{ID: "data", Type: "volume", VolumeName: "memosdata"}}},
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(len(specs))
+	for i := range specs {
+		i := i
+		go func() {
+			defer wg.Done()
+			if _, err := RunSourceJobs(context.Background(), runtime, Options{JobImage: "volust:latest", WriteLimiter: limiter}, profiles[i], specs[i], specs[i].Sources[0], false); err != nil {
+				t.Errorf("RunSourceJobs %d returned error: %v", i, err)
+			}
+		}()
+	}
+	deadline := time.After(time.Second)
+	for atomic.LoadInt32(&runtime.started) < 2 {
+		select {
+		case <-deadline:
+			close(runtime.release)
+			wg.Wait()
+			t.Fatalf("two jobs did not start under global limit, started=%d maxRunning=%d", atomic.LoadInt32(&runtime.started), atomic.LoadInt32(&runtime.maxRunning))
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	if got := atomic.LoadInt32(&runtime.maxRunning); got != 2 {
+		close(runtime.release)
+		wg.Wait()
+		t.Fatalf("global limit did not allow exactly two jobs before release, maxRunning=%d", got)
+	}
+	if got := atomic.LoadInt32(&runtime.started); got != 2 {
+		close(runtime.release)
+		wg.Wait()
+		t.Fatalf("third job started before a slot was released, started=%d", got)
+	}
+	close(runtime.release)
+	wg.Wait()
+	if got := atomic.LoadInt32(&runtime.maxRunning); got != 2 {
+		t.Fatalf("jobs exceeded global limit, maxRunning=%d", got)
+	}
+}
+
+func TestWriteLimiterCoordinatesAcrossInstances(t *testing.T) {
+	lockDir := t.TempDir()
+	first := NewWriteLimiterWithDir(1, lockDir)
+	second := NewWriteLimiterWithDir(1, lockDir)
+	release := make(chan struct{})
+	started := make(chan struct{})
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- first.With(context.Background(), func() error {
+			close(started)
+			<-release
+			return nil
+		})
+	}()
+	<-started
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	err := second.With(ctx, func() error {
+		t.Fatal("second limiter instance acquired the only slot while first held it")
+		return nil
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		close(release)
+		<-firstDone
+		t.Fatalf("second With error = %v, want context deadline exceeded", err)
+	}
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first With returned error: %v", err)
+	}
+	if err := second.With(context.Background(), func() error { return nil }); err != nil {
+		t.Fatalf("second With after release returned error: %v", err)
+	}
+}
+
+func TestWriteLimiterCoordinatesAcrossProcesses(t *testing.T) {
+	lockDir := t.TempDir()
+	ready := filepath.Join(t.TempDir(), "ready")
+	release := filepath.Join(t.TempDir(), "release")
+
+	first := exec.Command(os.Args[0], "-test.run=TestWriteLimiterProcessHelper")
+	first.Env = append(os.Environ(),
+		"VOLUST_WRITE_LIMITER_HELPER=hold",
+		"VOLUST_WRITE_LIMITER_DIR="+lockDir,
+		"VOLUST_WRITE_LIMITER_READY="+ready,
+		"VOLUST_WRITE_LIMITER_RELEASE="+release,
+	)
+	if err := first.Start(); err != nil {
+		t.Fatalf("start first helper: %v", err)
+	}
+	defer first.Process.Kill()
+
+	waitForFile(t, ready)
+	second := exec.Command(os.Args[0], "-test.run=TestWriteLimiterProcessHelper")
+	second.Env = append(os.Environ(),
+		"VOLUST_WRITE_LIMITER_HELPER=timeout",
+		"VOLUST_WRITE_LIMITER_DIR="+lockDir,
+	)
+	output, err := second.CombinedOutput()
+	if err != nil {
+		_ = os.WriteFile(release, []byte("release"), 0o600)
+		_ = first.Wait()
+		t.Fatalf("second helper failed: %v\n%s", err, output)
+	}
+
+	if err := os.WriteFile(release, []byte("release"), 0o600); err != nil {
+		t.Fatalf("write release file: %v", err)
+	}
+	if err := first.Wait(); err != nil {
+		t.Fatalf("first helper failed: %v", err)
+	}
+}
+
+func TestWriteLimiterProcessHelper(t *testing.T) {
+	mode := os.Getenv("VOLUST_WRITE_LIMITER_HELPER")
+	if mode == "" {
+		return
+	}
+	dir := os.Getenv("VOLUST_WRITE_LIMITER_DIR")
+	limiter := NewWriteLimiterWithDir(1, dir)
+	switch mode {
+	case "hold":
+		err := limiter.With(context.Background(), func() error {
+			if err := os.WriteFile(os.Getenv("VOLUST_WRITE_LIMITER_READY"), []byte("ready"), 0o600); err != nil {
+				return err
+			}
+			waitForFile(t, os.Getenv("VOLUST_WRITE_LIMITER_RELEASE"))
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("hold helper With returned error: %v", err)
+		}
+	case "timeout":
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		err := limiter.With(ctx, func() error {
+			t.Fatal("timeout helper acquired the only slot while another process held it")
+			return nil
+		})
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("timeout helper With error = %v, want context deadline exceeded", err)
+		}
+	default:
+		t.Fatalf("unknown helper mode %q", mode)
+	}
+}
+
+func waitForFile(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", path)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestRunSourceJobsStillSerializesSameRepositoryBeforeGlobalWriteLimit(t *testing.T) {
+	runtime := &lockingRuntime{release: make(chan struct{})}
+	limiter := NewWriteLimiter(4)
+	profile := config.Profile{Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app", Password: "secret"}
+	specA := volustdocker.BackupSpec{Name: "postgres", Profile: "s3prod", Sources: []volustdocker.Source{{ID: "data", Type: "volume", VolumeName: "pgdata"}}}
+	specB := volustdocker.BackupSpec{Name: "redis", Profile: "s3prod", Sources: []volustdocker.Source{{ID: "data", Type: "volume", VolumeName: "redisdata"}}}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if _, err := RunSourceJobs(context.Background(), runtime, Options{JobImage: "volust:latest", WriteLimiter: limiter}, profile, specA, specA.Sources[0], false); err != nil {
+			t.Errorf("RunSourceJobs A returned error: %v", err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if _, err := RunSourceJobs(context.Background(), runtime, Options{JobImage: "volust:latest", WriteLimiter: limiter}, profile, specB, specB.Sources[0], false); err != nil {
+			t.Errorf("RunSourceJobs B returned error: %v", err)
+		}
+	}()
+	for atomic.LoadInt32(&runtime.started) == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	if got := atomic.LoadInt32(&runtime.maxRunning); got != 1 {
+		t.Fatalf("same repository jobs overlapped before release, maxRunning=%d", got)
+	}
+	close(runtime.release)
+	wg.Wait()
+	if got := atomic.LoadInt32(&runtime.maxRunning); got != 1 {
+		t.Fatalf("same repository jobs overlapped, maxRunning=%d", got)
+	}
+}
+
 func TestRepositoryLockKeyUsesWebDAVEndpointInsteadOfProfileAlias(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	body := []byte(`
@@ -715,6 +925,50 @@ func TestRunSourceJobsSerializesStopBeforeBackupByContainer(t *testing.T) {
 	}
 }
 
+func TestRunSourceJobsAcquiresGlobalWriteSlotBeforeStoppingContainer(t *testing.T) {
+	runtime := &containerStopRuntime{release: make(chan struct{})}
+	limiter := NewWriteLimiter(1)
+	profileA := config.Profile{Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app-a", Password: "secret"}
+	profileB := config.Profile{Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app-b", Password: "secret"}
+	specA := volustdocker.BackupSpec{Name: "postgres", Profile: "s3prod-a", Sources: []volustdocker.Source{{ID: "data", Type: "volume", VolumeName: "pgdata"}}}
+	specB := volustdocker.BackupSpec{
+		ContainerID:      "abc",
+		ContainerRunning: true,
+		Name:             "redis",
+		Profile:          "s3prod-b",
+		Sources:          []volustdocker.Source{{ID: "data", Type: "volume", VolumeName: "redisdata"}},
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if _, err := RunSourceJobs(context.Background(), runtime, Options{JobImage: "volust:latest", WriteLimiter: limiter}, profileA, specA, specA.Sources[0], false); err != nil {
+			t.Errorf("RunSourceJobs A returned error: %v", err)
+		}
+	}()
+	for atomic.LoadInt32(&runtime.started) == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if _, err := RunSourceJobs(context.Background(), runtime, Options{JobImage: "volust:latest", WriteLimiter: limiter, StopBeforeBackup: true}, profileB, specB, specB.Sources[0], false); err != nil {
+			t.Errorf("RunSourceJobs B returned error: %v", err)
+		}
+	}()
+	if got := atomic.LoadInt32(&runtime.stopAttempts); got != 0 {
+		close(runtime.release)
+		wg.Wait()
+		t.Fatalf("container stopped before a global write slot was available, stopAttempts=%d", got)
+	}
+	close(runtime.release)
+	wg.Wait()
+	if got := atomic.LoadInt32(&runtime.stopAttempts); got != 1 {
+		t.Fatalf("container was not stopped after slot became available, stopAttempts=%d", got)
+	}
+}
+
 type lockingRuntime struct {
 	started    int32
 	running    int32
@@ -734,7 +988,8 @@ func (f *lockingRuntime) RunJob(_ context.Context, _ volustdocker.JobSpec) error
 			break
 		}
 	}
-	if atomic.AddInt32(&f.started, 1) == 1 {
+	atomic.AddInt32(&f.started, 1)
+	if f.release != nil {
 		<-f.release
 	}
 	atomic.AddInt32(&f.running, -1)
@@ -761,7 +1016,8 @@ func (f *containerStopRuntime) ListContainers(_ context.Context, _ volustdocker.
 }
 
 func (f *containerStopRuntime) RunJob(_ context.Context, _ volustdocker.JobSpec) error {
-	if atomic.AddInt32(&f.started, 1) == 1 {
+	atomic.AddInt32(&f.started, 1)
+	if f.release != nil {
 		<-f.release
 	}
 	return nil

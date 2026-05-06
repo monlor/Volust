@@ -39,8 +39,10 @@ func BackupCommand(profile config.Profile, spec docker.BackupSpec, source docker
 	for _, excludeFile := range excludeFiles {
 		backupArgs = append(backupArgs, "--exclude-file", excludeFile)
 	}
+	configArgs := baseArgs(profile, "cat")
+	configArgs = append(configArgs, "config")
 	initArgs := baseArgs(profile, "init")
-	script := shellJoin(initArgs) + " || true && " + shellJoin(backupArgs)
+	script := shellJoin(configArgs) + " >/dev/null 2>&1 || " + shellJoin(initArgs) + " && " + shellJoin(backupArgs)
 	return Command{Operation: "backup", Args: []string{"sh", "-ec", script}, Env: profile.ResticEnv()}
 }
 

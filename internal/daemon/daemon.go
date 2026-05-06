@@ -34,7 +34,9 @@ type Options struct {
 	RefreshInterval  time.Duration
 	IncludeStopped   bool
 	StopBeforeBackup bool
+	WriteLimiter     *WriteLimiter
 	AssumeLocked     bool
+	AssumeWriteSlot  bool
 	SkipRetention    bool
 }
 
@@ -251,14 +253,14 @@ func runSourceJobsLocked(ctx context.Context, runtime Runtime, options Options, 
 		if command.Operation != "backup" {
 			job.Name = fmt.Sprintf("volust-%s-%s", command.Operation, jobName)
 		}
-		if command.Operation == "backup" && shouldStopBeforeBackup(options, spec) {
-			if err := runJobWithStoppedContainer(ctx, runtime, spec.ContainerID, job); err != nil {
-				return jobsStarted, err
+		err := withWriteSlot(ctx, options, func() error {
+			if command.Operation == "backup" && shouldStopBeforeBackup(options, spec) {
+				return runJobWithStoppedContainer(ctx, runtime, spec.ContainerID, job)
 			}
-		} else {
-			if err := runtime.RunJob(ctx, job); err != nil {
-				return jobsStarted, err
-			}
+			return runtime.RunJob(ctx, job)
+		})
+		if err != nil {
+			return jobsStarted, err
 		}
 		jobsStarted++
 	}
@@ -306,8 +308,21 @@ func runPruneJob(ctx context.Context, runtime Runtime, options Options, profile 
 		Env:       command.Env,
 	}
 	return WithSourceLock(ctx, RepositoryLockKey(profile), func() error {
-		return runtime.RunJob(ctx, job)
+		return withWriteSlot(ctx, options, func() error {
+			return runtime.RunJob(ctx, job)
+		})
 	})
+}
+
+func RunPruneJob(ctx context.Context, runtime Runtime, options Options, profile config.Profile, name string) error {
+	return runPruneJob(ctx, runtime, options, profile, name)
+}
+
+func withWriteSlot(ctx context.Context, options Options, fn func() error) error {
+	if options.AssumeWriteSlot || options.WriteLimiter == nil {
+		return fn()
+	}
+	return options.WriteLimiter.With(ctx, fn)
 }
 
 func LoadExcludeFiles(excludeDir string, spec *volustdocker.BackupSpec) error {

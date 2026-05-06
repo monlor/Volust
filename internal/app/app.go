@@ -74,7 +74,11 @@ func runDaemon(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		report, err := daemon.RunOnce(context.Background(), cfg, runtime, daemon.Options{JobImage: jobImage(), IncludeStopped: includeStoppedContainers(), StopBeforeBackup: stopContainersBeforeBackup()})
+		limiter, err := maxConcurrentWritesLimiter()
+		if err != nil {
+			return err
+		}
+		report, err := daemon.RunOnce(context.Background(), cfg, runtime, daemon.Options{JobImage: jobImage(), IncludeStopped: includeStoppedContainers(), StopBeforeBackup: stopContainersBeforeBackup(), WriteLimiter: limiter})
 		if err != nil {
 			return err
 		}
@@ -85,10 +89,14 @@ func runDaemon(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	limiter, err := maxConcurrentWritesLimiter()
+	if err != nil {
+		return err
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	fmt.Fprintln(out, "daemon mode: scheduling discovered label-backed jobs")
-	report, err := daemon.RunScheduler(ctx, cfg, runtime, daemon.Options{JobImage: jobImage(), LogWriter: out, IncludeStopped: includeStoppedContainers(), StopBeforeBackup: stopContainersBeforeBackup()})
+	report, err := daemon.RunScheduler(ctx, cfg, runtime, daemon.Options{JobImage: jobImage(), LogWriter: out, IncludeStopped: includeStoppedContainers(), StopBeforeBackup: stopContainersBeforeBackup(), WriteLimiter: limiter})
 	if err != nil && !errors.Is(err, context.Canceled) {
 		return err
 	}
@@ -201,17 +209,25 @@ func runBackup(args []string, in io.Reader, out io.Writer) error {
 		return err
 	}
 	profileCfg := cfg.Profiles[profileName]
+	limiter, err := maxConcurrentWritesLimiter()
+	if err != nil {
+		return err
+	}
 	var jobsStarted int
 	for _, candidate := range selected {
 		if err := daemon.LoadExcludeFiles("/etc/volust/excludes", &candidate.Spec); err != nil {
 			return err
 		}
-		started, err := daemon.RunSourceJobs(context.Background(), runtime, daemon.Options{JobImage: jobImage(), StopBeforeBackup: stopContainersBeforeBackup()}, profileCfg, candidate.Spec, candidate.Source, true)
+		started, err := daemon.RunSourceJobs(context.Background(), runtime, daemon.Options{JobImage: jobImage(), StopBeforeBackup: stopContainersBeforeBackup(), WriteLimiter: limiter}, profileCfg, candidate.Spec, candidate.Source, false)
 		if err != nil {
 			return err
 		}
 		jobsStarted += started
 	}
+	if err := daemon.RunPruneJob(context.Background(), runtime, daemon.Options{JobImage: jobImage(), WriteLimiter: limiter}, profileCfg, selected[0].Spec.Name); err != nil {
+		return err
+	}
+	jobsStarted++
 	fmt.Fprintf(out, "backup complete: app=%s sources=%d jobs_started=%d\n", selected[0].Spec.Name, len(selected), jobsStarted)
 	return nil
 }
@@ -257,6 +273,10 @@ func runRestore(args []string, in io.Reader, out io.Writer) error {
 	}
 
 	profileCfg := cfg.Profiles[*profile]
+	limiter, err := maxConcurrentWritesLimiter()
+	if err != nil {
+		return err
+	}
 	err = daemon.WithSourceLock(ctx, daemon.RepositoryLockKey(profileCfg), func() error {
 		return daemon.WithSourceLock(ctx, daemon.SourceLockKey(*profile, selected.Spec, selected.Source), func() error {
 			resolvedSnapshot, err := resolveSnapshot(ctx, runtime, profileCfg, restic.RestoreRequest{
@@ -268,11 +288,13 @@ func runRestore(args []string, in io.Reader, out io.Writer) error {
 			if err != nil {
 				return err
 			}
-			stopped, err := stopMountedContainers(ctx, runtime, selected)
-			if err != nil {
-				return err
-			}
-			return restoreWithStoppedContainers(ctx, runtime, cfg, *profile, *appName, *source, resolvedSnapshot, *skipPreBackup, selected, stopped)
+			return limiter.With(ctx, func() error {
+				stopped, err := stopMountedContainers(ctx, runtime, selected)
+				if err != nil {
+					return err
+				}
+				return restoreWithStoppedContainers(ctx, runtime, cfg, *profile, *appName, *source, resolvedSnapshot, *skipPreBackup, selected, stopped)
+			})
 		})
 	})
 	if err != nil {
@@ -302,7 +324,7 @@ func restoreWithStoppedContainers(ctx context.Context, runtime daemonRuntime, cf
 		if err := daemon.LoadExcludeFiles("/etc/volust/excludes", &selected.Spec); err != nil {
 			return restartContainers(ctx, runtime, stopped, err)
 		}
-		if _, err := daemon.RunSourceJobs(ctx, runtime, daemon.Options{JobImage: jobImage(), AssumeLocked: true, SkipRetention: true}, profileCfg, selected.Spec, selected.Source, false); err != nil {
+		if _, err := daemon.RunSourceJobs(ctx, runtime, daemon.Options{JobImage: jobImage(), AssumeLocked: true, AssumeWriteSlot: true, SkipRetention: true}, profileCfg, selected.Spec, selected.Source, false); err != nil {
 			return restartContainers(ctx, runtime, stopped, err)
 		}
 	}
@@ -585,6 +607,21 @@ func includeStoppedContainers() bool {
 func stopContainersBeforeBackup() bool {
 	value := strings.TrimSpace(strings.ToLower(os.Getenv("VOLUST_STOP_CONTAINERS_BEFORE_BACKUP")))
 	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
+func maxConcurrentWritesLimiter() (*daemon.WriteLimiter, error) {
+	value := strings.TrimSpace(os.Getenv("VOLUST_MAX_CONCURRENT_WRITES"))
+	if value == "" {
+		return daemon.NewWriteLimiter(4), nil
+	}
+	max, err := strconv.Atoi(value)
+	if err != nil {
+		return nil, fmt.Errorf("VOLUST_MAX_CONCURRENT_WRITES must be an integer: %w", err)
+	}
+	if max < 0 {
+		return nil, fmt.Errorf("VOLUST_MAX_CONCURRENT_WRITES must be >= 0")
+	}
+	return daemon.NewWriteLimiter(max), nil
 }
 
 func usage(out io.Writer) error {

@@ -28,7 +28,7 @@ func TestBackupForgetPruneCommands(t *testing.T) {
 	backup := BackupCommand(profile, spec, spec.Sources[0], []string{"/etc/volust/excludes/common.txt"})
 	wantBackup := []string{
 		"sh", "-ec",
-		"restic -r s3:s3.amazonaws.com/bucket/app --retry-lock 5m init || true && restic -r s3:s3.amazonaws.com/bucket/app --retry-lock 5m backup /volust/sources/data --tag volust --tag app:postgres --tag profile:s3prod --tag source:data --exclude 'cache/**' --exclude-file /etc/volust/excludes/common.txt",
+		"restic -r s3:s3.amazonaws.com/bucket/app --retry-lock 5m cat config >/dev/null 2>&1 || restic -r s3:s3.amazonaws.com/bucket/app --retry-lock 5m init && restic -r s3:s3.amazonaws.com/bucket/app --retry-lock 5m backup /volust/sources/data --tag volust --tag app:postgres --tag profile:s3prod --tag source:data --exclude 'cache/**' --exclude-file /etc/volust/excludes/common.txt",
 	}
 	if !equalStrings(backup.Args, wantBackup) {
 		t.Fatalf("backup args = %#v, want %#v", backup.Args, wantBackup)
