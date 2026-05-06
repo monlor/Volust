@@ -1,6 +1,7 @@
 package restic
 
 import (
+	"os"
 	"sort"
 	"strings"
 
@@ -30,7 +31,7 @@ type Snapshot struct {
 }
 
 func BackupCommand(profile config.Profile, spec docker.BackupSpec, source docker.Source, excludeFiles []string) Command {
-	backupArgs := baseArgs(profile, "backup")
+	backupArgs := baseArgs(profile, spec.Name, "backup")
 	backupArgs = append(backupArgs, "/volust/sources/"+source.ID)
 	backupArgs = append(backupArgs, tagArgs(spec, source.ID)...)
 	for _, exclude := range spec.Excludes {
@@ -39,22 +40,22 @@ func BackupCommand(profile config.Profile, spec docker.BackupSpec, source docker
 	for _, excludeFile := range excludeFiles {
 		backupArgs = append(backupArgs, "--exclude-file", excludeFile)
 	}
-	configArgs := baseArgs(profile, "cat")
+	configArgs := baseArgs(profile, spec.Name, "cat")
 	configArgs = append(configArgs, "config")
-	initArgs := baseArgs(profile, "init")
+	initArgs := baseArgs(profile, spec.Name, "init")
 	script := shellJoin(configArgs) + " >/dev/null 2>&1 || " + shellJoin(initArgs) + " && " + shellJoin(backupArgs)
 	return Command{Operation: "backup", Args: []string{"sh", "-ec", script}, Env: profile.ResticEnv()}
 }
 
 func ForgetCommand(profile config.Profile, spec docker.BackupSpec, source docker.Source) Command {
-	args := baseArgs(profile, "forget")
+	args := baseArgs(profile, spec.Name, "forget")
 	args = append(args, tagArgs(spec, source.ID)...)
 	args = append(args, spec.Retention.Args()...)
 	return Command{Operation: "forget", Args: args, Env: profile.ResticEnv()}
 }
 
-func PruneCommand(profile config.Profile) Command {
-	return Command{Operation: "prune", Args: baseArgs(profile, "prune"), Env: profile.ResticEnv()}
+func PruneCommand(profile config.Profile, appName string) Command {
+	return Command{Operation: "prune", Args: baseArgs(profile, appName, "prune"), Env: profile.ResticEnv()}
 }
 
 func RestoreCommand(profile config.Profile, request RestoreRequest) Command {
@@ -122,8 +123,8 @@ func (s Snapshot) SnapshotID() string {
 	return s.ID
 }
 
-func baseArgs(profile config.Profile, operation string) []string {
-	return []string{"restic", "-r", profile.RepositoryString(), "--retry-lock", "5m", operation}
+func baseArgs(profile config.Profile, appName, operation string) []string {
+	return []string{"restic", "-r", profile.RepositoryStringForApp(appName), "--retry-lock", lockTimeout(), operation}
 }
 
 func tagArgs(spec docker.BackupSpec, sourceID string) []string {
@@ -136,7 +137,7 @@ func tagArgs(spec docker.BackupSpec, sourceID string) []string {
 }
 
 func restoreArgs(profile config.Profile, request RestoreRequest, staging, include string) []string {
-	args := []string{"restic", "-r", profile.RepositoryString(), "restore", request.SnapshotID, "--target", staging, "--include", include}
+	args := []string{"restic", "-r", profile.RepositoryStringForApp(request.App), "restore", request.SnapshotID, "--target", staging, "--include", include}
 	args = withRetryLock(args)
 	args = append(args, "--path", include)
 	if request.App != "" {
@@ -152,7 +153,7 @@ func restoreArgs(profile config.Profile, request RestoreRequest, staging, includ
 }
 
 func snapshotValidationArgs(profile config.Profile, request RestoreRequest, include string) []string {
-	args := []string{"restic", "-r", profile.RepositoryString(), "snapshots"}
+	args := []string{"restic", "-r", profile.RepositoryStringForApp(request.App), "snapshots"}
 	if request.SnapshotID != "" {
 		args = append(args, request.SnapshotID)
 	}
@@ -175,9 +176,16 @@ func withRetryLock(args []string) []string {
 		return args
 	}
 	output := append([]string{}, args[:3]...)
-	output = append(output, "--retry-lock", "5m")
+	output = append(output, "--retry-lock", lockTimeout())
 	output = append(output, args[3:]...)
 	return output
+}
+
+func lockTimeout() string {
+	if value := strings.TrimSpace(os.Getenv("VOLUST_LOCK_TIMEOUT")); value != "" {
+		return value
+	}
+	return "6h"
 }
 
 func shellJoin(args []string) string {

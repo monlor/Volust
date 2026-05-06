@@ -55,6 +55,9 @@ profiles:
 	if got := s3.RepositoryString(); got != "s3:s3.amazonaws.com/bucket/app" {
 		t.Fatalf("s3 repository = %q", got)
 	}
+	if got := s3.RepositoryStringForApp("postgres"); got != "s3:s3.amazonaws.com/bucket/app/postgres" {
+		t.Fatalf("s3 app repository = %q", got)
+	}
 	if got := s3.Password; got != "secret" {
 		t.Fatalf("password = %q", got)
 	}
@@ -65,6 +68,9 @@ profiles:
 	dav := cfg.Profiles["dav"]
 	if got := dav.RepositoryString(); got != "rclone:volust_dav:backups" {
 		t.Fatalf("webdav repository = %q", got)
+	}
+	if got := dav.RepositoryStringForApp("postgres"); got != "rclone:volust_dav:backups/postgres" {
+		t.Fatalf("webdav app repository = %q", got)
 	}
 	if got := dav.Env["RCLONE_CONFIG_VOLUST_DAV_TYPE"]; got != "webdav" {
 		t.Fatalf("rclone type env = %q", got)
@@ -234,6 +240,40 @@ func TestLoadPreservesLiteralDollarInConfigValues(t *testing.T) {
 	}
 	if got := profile.Env["AWS_SECRET_ACCESS_KEY"]; got != "key$still-secret" {
 		t.Fatalf("AWS_SECRET_ACCESS_KEY = %q", got)
+	}
+}
+
+func TestAppRepositoryDirSanitizesUnsafeNamesWithStableHash(t *testing.T) {
+	if got := AppRepositoryDir("postgres"); got != "postgres" {
+		t.Fatalf("safe app repository dir = %q", got)
+	}
+	first := AppRepositoryDir("Team/Postgres")
+	second := AppRepositoryDir("Team Postgres")
+	if first == second {
+		t.Fatalf("sanitized app dirs collided: %q", first)
+	}
+	if !strings.HasPrefix(first, "team-postgres-") || len(first) != len("team-postgres-")+8 {
+		t.Fatalf("unsafe app repository dir = %q", first)
+	}
+	if got := AppRepositoryDir("Team/Postgres"); got != first {
+		t.Fatalf("app repository dir is not stable: %q != %q", got, first)
+	}
+}
+
+func TestBackendKeyGroupsByStorageRoot(t *testing.T) {
+	a := Profile{Type: ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/volust"}
+	b := Profile{Type: ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/other"}
+	c := Profile{Type: ProfileS3, Repository: "s3:s3.amazonaws.com/other/volust"}
+	if a.BackendKey() != b.BackendKey() {
+		t.Fatalf("same S3 endpoint and bucket should share backend key: %q != %q", a.BackendKey(), b.BackendKey())
+	}
+	if a.BackendKey() == c.BackendKey() {
+		t.Fatalf("different S3 bucket should not share backend key: %q", a.BackendKey())
+	}
+	davA := Profile{Type: ProfileWebDAV, Path: "volust", WebDAV: WebDAVConfig{URL: "https://dav.example.com/root/"}}
+	davB := Profile{Type: ProfileWebDAV, Path: "other", WebDAV: WebDAVConfig{URL: "https://dav.example.com/root"}}
+	if davA.BackendKey() != davB.BackendKey() {
+		t.Fatalf("same WebDAV URL should share backend key: %q != %q", davA.BackendKey(), davB.BackendKey())
 	}
 }
 

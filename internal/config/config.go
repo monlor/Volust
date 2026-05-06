@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -154,6 +156,104 @@ func (p Profile) RepositoryString() string {
 	default:
 		return p.Repository
 	}
+}
+
+func (p Profile) RepositoryStringForApp(appName string) string {
+	appDir := AppRepositoryDir(appName)
+	switch p.Type {
+	case ProfileWebDAV:
+		base := strings.Trim(strings.TrimPrefix(p.Path, "/"), "/")
+		if base == "" {
+			return "rclone:" + p.rcloneRemoteName() + ":" + appDir
+		}
+		return "rclone:" + p.rcloneRemoteName() + ":" + base + "/" + appDir
+	default:
+		return strings.TrimRight(p.Repository, "/") + "/" + appDir
+	}
+}
+
+func (p Profile) BackendKey() string {
+	switch p.Type {
+	case ProfileWebDAV:
+		return "webdav\x00" + normalizeBackendPart(p.WebDAV.URL)
+	case ProfileS3:
+		endpoint, bucket, ok := parseS3RepositoryRoot(p.Repository)
+		if ok {
+			return "s3\x00" + normalizeBackendPart(endpoint) + "\x00" + bucket
+		}
+		return "s3\x00" + normalizeBackendPart(strings.TrimRight(p.Repository, "/"))
+	default:
+		return p.Type + "\x00" + normalizeBackendPart(p.RepositoryString())
+	}
+}
+
+func AppRepositoryDir(appName string) string {
+	value := strings.TrimSpace(appName)
+	if value == "" {
+		value = "app"
+	}
+	if isSafeAppRepositoryDir(value) {
+		return value
+	}
+	slug := appRepositorySlug(value)
+	sum := sha256.Sum256([]byte(value))
+	return slug + "-" + hex.EncodeToString(sum[:4])
+}
+
+func isSafeAppRepositoryDir(value string) bool {
+	if value == "." || value == ".." {
+		return false
+	}
+	for _, r := range value {
+		ok := (r >= 'a' && r <= 'z') ||
+			(r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') ||
+			r == '.' || r == '_' || r == '-'
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func appRepositorySlug(value string) string {
+	value = strings.ToLower(value)
+	var builder strings.Builder
+	lastDash := false
+	for _, r := range value {
+		ok := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '.' || r == '_' || r == '-'
+		if ok {
+			builder.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			builder.WriteByte('-')
+			lastDash = true
+		}
+	}
+	slug := strings.Trim(builder.String(), ".-_")
+	if slug == "" {
+		return "app"
+	}
+	return slug
+}
+
+func parseS3RepositoryRoot(repository string) (string, string, bool) {
+	const prefix = "s3:"
+	if !strings.HasPrefix(repository, prefix) {
+		return "", "", false
+	}
+	rest := strings.TrimPrefix(repository, prefix)
+	parts := strings.SplitN(rest, "/", 3)
+	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
+}
+
+func normalizeBackendPart(value string) string {
+	return strings.ToLower(strings.TrimRight(strings.TrimSpace(value), "/"))
 }
 
 func (p Profile) ResticEnv() map[string]string {

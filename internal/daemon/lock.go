@@ -37,11 +37,22 @@ func SourceLockKey(profile string, spec volustdocker.BackupSpec, source volustdo
 	return profile + "\x00" + spec.Name + "\x00" + source.ID
 }
 
-func RepositoryLockKey(profile config.Profile) string {
+func RepositoryLockKey(profile config.Profile, appName string) string {
 	if profile.Type == config.ProfileWebDAV {
-		return "repo\x00webdav\x00" + strings.TrimRight(profile.WebDAV.URL, "/") + "\x00" + strings.Trim(profile.Path, "/")
+		path := strings.Trim(strings.TrimPrefix(profile.Path, "/"), "/")
+		appDir := config.AppRepositoryDir(appName)
+		if path == "" {
+			path = appDir
+		} else {
+			path += "/" + appDir
+		}
+		return "repo\x00webdav\x00" + strings.TrimRight(profile.WebDAV.URL, "/") + "\x00" + path
 	}
-	return "repo\x00" + profile.RepositoryString()
+	return "repo\x00" + profile.RepositoryStringForApp(appName)
+}
+
+func BackendWriteKey(profile config.Profile) string {
+	return "backend\x00" + profile.BackendKey()
 }
 
 func ContainerLockKey(containerID string) string {
@@ -53,8 +64,13 @@ func WithSourceLock(ctx context.Context, key string, fn func() error) error {
 }
 
 func (m *lockManager) with(ctx context.Context, key string, fn func() error) error {
-	local := m.localLock(key)
-	local.Lock()
+	waitCtx, cancel := lockWaitContext(ctx)
+	defer cancel()
+
+	local, err := m.acquireLocalLock(waitCtx, key)
+	if err != nil {
+		return err
+	}
 	defer local.Unlock()
 
 	if err := os.MkdirAll(m.dir, 0o700); err != nil {
@@ -65,11 +81,25 @@ func (m *lockManager) with(ctx context.Context, key string, fn func() error) err
 		return err
 	}
 	defer file.Close()
-	if err := flock(ctx, file); err != nil {
+	if err := flock(waitCtx, file); err != nil {
 		return err
 	}
 	defer syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
 	return fn()
+}
+
+func (m *lockManager) acquireLocalLock(ctx context.Context, key string) (*sync.Mutex, error) {
+	local := m.localLock(key)
+	for {
+		if local.TryLock() {
+			return local, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }
 
 func (m *lockManager) localLock(key string) *sync.Mutex {
@@ -101,4 +131,14 @@ func flock(ctx context.Context, file *os.File) error {
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
+}
+
+func lockWaitContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	timeout := 6 * time.Hour
+	if value := strings.TrimSpace(os.Getenv("VOLUST_LOCK_TIMEOUT")); value != "" {
+		if parsed, err := time.ParseDuration(value); err == nil && parsed > 0 {
+			timeout = parsed
+		}
+	}
+	return context.WithTimeout(ctx, timeout)
 }

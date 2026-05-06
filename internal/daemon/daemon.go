@@ -62,7 +62,7 @@ func RunOnce(ctx context.Context, cfg config.Config, runtime Runtime, options Op
 
 	var report Report
 	pruneProfiles := map[string]config.Profile{}
-	pruneNames := map[string]string{}
+	pruneApps := map[string]map[string]struct{}{}
 	for _, container := range containers {
 		spec, err := volustdocker.ParseBackupSpecWithDefaults(container, cfg.Profiles, cfg.Defaults)
 		if err != nil {
@@ -76,9 +76,10 @@ func RunOnce(ctx context.Context, cfg config.Config, runtime Runtime, options Op
 		}
 		profile := cfg.Profiles[spec.Profile]
 		pruneProfiles[spec.Profile] = profile
-		if pruneNames[spec.Profile] == "" {
-			pruneNames[spec.Profile] = spec.Name
+		if pruneApps[spec.Profile] == nil {
+			pruneApps[spec.Profile] = map[string]struct{}{}
 		}
+		pruneApps[spec.Profile][spec.Name] = struct{}{}
 		for _, source := range spec.Sources {
 			logDiscovered(options.LogWriter, spec, source)
 			jobsStarted, err := RunSourceJobs(ctx, runtime, options, profile, spec, source, false)
@@ -95,10 +96,17 @@ func RunOnce(ctx context.Context, cfg config.Config, runtime Runtime, options Op
 	sort.Strings(profileNames)
 	for _, profileName := range profileNames {
 		profile := pruneProfiles[profileName]
-		if err := runPruneJob(ctx, runtime, options, profile, pruneNames[profileName]); err != nil {
-			return report, err
+		appNames := make([]string, 0, len(pruneApps[profileName]))
+		for appName := range pruneApps[profileName] {
+			appNames = append(appNames, appName)
 		}
-		report.JobsStarted++
+		sort.Strings(appNames)
+		for _, appName := range appNames {
+			if err := runPruneJob(ctx, runtime, options, profile, appName); err != nil {
+				return report, err
+			}
+			report.JobsStarted++
+		}
 	}
 	return report, nil
 }
@@ -205,7 +213,7 @@ func runScheduledSourceJobs(ctx context.Context, runtime Runtime, options Option
 func RunSourceJobs(ctx context.Context, runtime Runtime, options Options, profile config.Profile, spec volustdocker.BackupSpec, source volustdocker.Source, includePrune bool) (int, error) {
 	if !options.AssumeLocked {
 		var jobsStarted int
-		err := WithSourceLock(ctx, RepositoryLockKey(profile), func() error {
+		err := WithSourceLock(ctx, RepositoryLockKey(profile, spec.Name), func() error {
 			return WithSourceLock(ctx, SourceLockKey(spec.Profile, spec, source), func() error {
 				var err error
 				jobsStarted, err = runSourceJobsLocked(ctx, runtime, options, profile, spec, source, includePrune)
@@ -236,7 +244,7 @@ func runSourceJobsLocked(ctx context.Context, runtime Runtime, options Options, 
 		commands = append(commands, restic.ForgetCommand(profile, spec, source))
 	}
 	if includePrune {
-		commands = append(commands, restic.PruneCommand(profile))
+		commands = append(commands, restic.PruneCommand(profile, spec.Name))
 	}
 
 	jobsStarted := 0
@@ -253,7 +261,7 @@ func runSourceJobsLocked(ctx context.Context, runtime Runtime, options Options, 
 		if command.Operation != "backup" {
 			job.Name = fmt.Sprintf("volust-%s-%s", command.Operation, jobName)
 		}
-		err := withWriteSlot(ctx, options, func() error {
+		err := withWriteSlot(ctx, options, profile, func() error {
 			if command.Operation == "backup" && shouldStopBeforeBackup(options, spec) {
 				return runJobWithStoppedContainer(ctx, runtime, spec.ContainerID, job)
 			}
@@ -299,7 +307,7 @@ func restartBackupContainer(containerID string, runtime Runtime, err error) erro
 }
 
 func runPruneJob(ctx context.Context, runtime Runtime, options Options, profile config.Profile, name string) error {
-	command := restic.PruneCommand(profile)
+	command := restic.PruneCommand(profile, name)
 	job := volustdocker.JobSpec{
 		Name:      "volust-prune-" + strings.ReplaceAll(name, "/", "-"),
 		Image:     options.JobImage,
@@ -307,8 +315,8 @@ func runPruneJob(ctx context.Context, runtime Runtime, options Options, profile 
 		Args:      command.Args,
 		Env:       command.Env,
 	}
-	return WithSourceLock(ctx, RepositoryLockKey(profile), func() error {
-		return withWriteSlot(ctx, options, func() error {
+	return WithSourceLock(ctx, RepositoryLockKey(profile, name), func() error {
+		return withWriteSlot(ctx, options, profile, func() error {
 			return runtime.RunJob(ctx, job)
 		})
 	})
@@ -318,11 +326,11 @@ func RunPruneJob(ctx context.Context, runtime Runtime, options Options, profile 
 	return runPruneJob(ctx, runtime, options, profile, name)
 }
 
-func withWriteSlot(ctx context.Context, options Options, fn func() error) error {
+func withWriteSlot(ctx context.Context, options Options, profile config.Profile, fn func() error) error {
 	if options.AssumeWriteSlot || options.WriteLimiter == nil {
 		return fn()
 	}
-	return options.WriteLimiter.With(ctx, fn)
+	return options.WriteLimiter.With(ctx, BackendWriteKey(profile), fn)
 }
 
 func LoadExcludeFiles(excludeDir string, spec *volustdocker.BackupSpec) error {

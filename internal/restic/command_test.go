@@ -28,7 +28,7 @@ func TestBackupForgetPruneCommands(t *testing.T) {
 	backup := BackupCommand(profile, spec, spec.Sources[0], []string{"/etc/volust/excludes/common.txt"})
 	wantBackup := []string{
 		"sh", "-ec",
-		"restic -r s3:s3.amazonaws.com/bucket/app --retry-lock 5m cat config >/dev/null 2>&1 || restic -r s3:s3.amazonaws.com/bucket/app --retry-lock 5m init && restic -r s3:s3.amazonaws.com/bucket/app --retry-lock 5m backup /volust/sources/data --tag volust --tag app:postgres --tag profile:s3prod --tag source:data --exclude 'cache/**' --exclude-file /etc/volust/excludes/common.txt",
+		"restic -r s3:s3.amazonaws.com/bucket/app/postgres --retry-lock 6h cat config >/dev/null 2>&1 || restic -r s3:s3.amazonaws.com/bucket/app/postgres --retry-lock 6h init && restic -r s3:s3.amazonaws.com/bucket/app/postgres --retry-lock 6h backup /volust/sources/data --tag volust --tag app:postgres --tag profile:s3prod --tag source:data --exclude 'cache/**' --exclude-file /etc/volust/excludes/common.txt",
 	}
 	if !equalStrings(backup.Args, wantBackup) {
 		t.Fatalf("backup args = %#v, want %#v", backup.Args, wantBackup)
@@ -39,7 +39,7 @@ func TestBackupForgetPruneCommands(t *testing.T) {
 
 	forget := ForgetCommand(profile, spec, spec.Sources[0])
 	wantForget := []string{
-		"restic", "-r", "s3:s3.amazonaws.com/bucket/app", "--retry-lock", "5m", "forget",
+		"restic", "-r", "s3:s3.amazonaws.com/bucket/app/postgres", "--retry-lock", "6h", "forget",
 		"--tag", "volust", "--tag", "app:postgres", "--tag", "profile:s3prod", "--tag", "source:data",
 		"--keep-last", "7", "--keep-daily", "7",
 	}
@@ -47,8 +47,8 @@ func TestBackupForgetPruneCommands(t *testing.T) {
 		t.Fatalf("forget args = %#v, want %#v", forget.Args, wantForget)
 	}
 
-	prune := PruneCommand(profile)
-	wantPrune := []string{"restic", "-r", "s3:s3.amazonaws.com/bucket/app", "--retry-lock", "5m", "prune"}
+	prune := PruneCommand(profile, "postgres")
+	wantPrune := []string{"restic", "-r", "s3:s3.amazonaws.com/bucket/app/postgres", "--retry-lock", "6h", "prune"}
 	if !equalStrings(prune.Args, wantPrune) {
 		t.Fatalf("prune args = %#v, want %#v", prune.Args, wantPrune)
 	}
@@ -66,7 +66,7 @@ func TestRestoreCommandUsesStagingAndRsyncDelete(t *testing.T) {
 
 	want := []string{
 		"sh", "-ec",
-		"rm -rf /volust/staging/restore && mkdir -p /volust/staging/restore /volust/target && restic -r rclone:volust_webdav:repo --retry-lock 5m restore latest --target /volust/staging/restore --include /volust/sources/config --path /volust/sources/config --tag volust --tag app:postgres --tag profile:dav --tag source:config && rsync -aHAX --numeric-ids --delete /volust/staging/restore/volust/sources/config/ /volust/target/",
+		"rm -rf /volust/staging/restore && mkdir -p /volust/staging/restore /volust/target && restic -r rclone:volust_webdav:repo/postgres --retry-lock 6h restore latest --target /volust/staging/restore --include /volust/sources/config --path /volust/sources/config --tag volust --tag app:postgres --tag profile:dav --tag source:config && rsync -aHAX --numeric-ids --delete /volust/staging/restore/volust/sources/config/ /volust/target/",
 	}
 	if !equalStrings(cmd.Args, want) {
 		t.Fatalf("restore args = %#v, want %#v", cmd.Args, want)
@@ -104,7 +104,7 @@ func TestRestoreCommandValidatesExplicitSnapshotBeforeDestructiveCopy(t *testing
 
 	script := cmd.Args[2]
 	for _, want := range []string{
-		"restic -r s3:s3.amazonaws.com/bucket/app --retry-lock 5m snapshots abc123 --json --path /volust/sources/data --tag volust --tag app:postgres --tag profile:s3prod --tag source:data",
+		"restic -r s3:s3.amazonaws.com/bucket/app/postgres --retry-lock 6h snapshots abc123 --json --path /volust/sources/data --tag volust --tag app:postgres --tag profile:s3prod --tag source:data",
 		"grep -q '\"id\"'",
 		"restore abc123",
 	} {
@@ -124,7 +124,7 @@ func TestSnapshotsCommandFiltersLatestByTags(t *testing.T) {
 	})
 
 	want := []string{
-		"restic", "-r", "s3:s3.amazonaws.com/bucket/app", "--retry-lock", "5m", "snapshots", "latest",
+		"restic", "-r", "s3:s3.amazonaws.com/bucket/app/postgres", "--retry-lock", "6h", "snapshots", "latest",
 		"--json", "--path", "/volust/sources/data",
 		"--tag", "volust", "--tag", "app:postgres", "--tag", "profile:s3prod", "--tag", "source:data",
 	}
@@ -148,7 +148,7 @@ func TestRestoreCommandQuotesShellArguments(t *testing.T) {
 
 	script := cmd.Args[2]
 	for _, want := range []string{
-		"-r 's3:s3.amazonaws.com/bucket/app repo'",
+		"-r 's3:s3.amazonaws.com/bucket/app repo/my-app-cccdfa68'",
 		"--include '/volust/sources/config data'",
 		"--tag 'app:my app'",
 		"mkdir -p /volust/staging/restore '/volust/target path'",
@@ -157,6 +157,20 @@ func TestRestoreCommandQuotesShellArguments(t *testing.T) {
 		if !strings.Contains(script, want) {
 			t.Fatalf("restore script %q does not contain %q", script, want)
 		}
+	}
+}
+
+func TestCommandsUseConfiguredLockTimeout(t *testing.T) {
+	t.Setenv("VOLUST_LOCK_TIMEOUT", "30m")
+	profile := config.Profile{Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app"}
+	cmd := SnapshotsCommand(profile, RestoreRequest{
+		SnapshotID: "latest",
+		App:        "postgres",
+		Profile:    "s3prod",
+		SourceID:   "data",
+	})
+	if got := strings.Join(cmd.Args, " "); !strings.Contains(got, "--retry-lock 30m") {
+		t.Fatalf("snapshot command = %q", got)
 	}
 }
 

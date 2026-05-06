@@ -5,6 +5,7 @@ services:
     restart: unless-stopped
     environment:
       TZ: Asia/Shanghai
+      # Storage root. Volust appends one repository directory per application.
       VOLUST_S3_REPOSITORY: s3:s3.amazonaws.com/my-bucket/volust
       RESTIC_PASSWORD: change-me
       AWS_ACCESS_KEY_ID: change-me
@@ -15,6 +16,7 @@ services:
       VOLUST_JOB_IMAGE: ghcr.io/monlor/volust:latest
       VOLUST_INCLUDE_STOPPED_CONTAINERS: "false"
       VOLUST_STOP_CONTAINERS_BEFORE_BACKUP: "false"
+      VOLUST_LOCK_TIMEOUT: 6h
       VOLUST_MAX_CONCURRENT_WRITES: "4"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

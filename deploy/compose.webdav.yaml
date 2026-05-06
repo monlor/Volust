@@ -6,6 +6,7 @@ services:
     environment:
       TZ: Asia/Shanghai
       VOLUST_PROFILE_TYPE: webdav
+      # Storage root. Volust appends one repository directory per application.
       VOLUST_WEBDAV_PATH: volust
       VOLUST_WEBDAV_URL: https://dav.example.com/backups
       VOLUST_WEBDAV_USER: alice
@@ -17,6 +18,7 @@ services:
       VOLUST_JOB_IMAGE: ghcr.io/monlor/volust:latest
       VOLUST_INCLUDE_STOPPED_CONTAINERS: "false"
       VOLUST_STOP_CONTAINERS_BEFORE_BACKUP: "false"
+      VOLUST_LOCK_TIMEOUT: 6h
       VOLUST_MAX_CONCURRENT_WRITES: "4"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

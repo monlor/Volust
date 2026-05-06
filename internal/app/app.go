@@ -277,7 +277,7 @@ func runRestore(args []string, in io.Reader, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	err = daemon.WithSourceLock(ctx, daemon.RepositoryLockKey(profileCfg), func() error {
+	err = daemon.WithSourceLock(ctx, daemon.RepositoryLockKey(profileCfg, *appName), func() error {
 		return daemon.WithSourceLock(ctx, daemon.SourceLockKey(*profile, selected.Spec, selected.Source), func() error {
 			resolvedSnapshot, err := resolveSnapshot(ctx, runtime, profileCfg, restic.RestoreRequest{
 				SnapshotID: *snapshot,
@@ -288,7 +288,7 @@ func runRestore(args []string, in io.Reader, out io.Writer) error {
 			if err != nil {
 				return err
 			}
-			return limiter.With(ctx, func() error {
+			return limiter.With(ctx, daemon.BackendWriteKey(profileCfg), func() error {
 				stopped, err := stopMountedContainers(ctx, runtime, selected)
 				if err != nil {
 					return err

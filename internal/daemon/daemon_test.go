@@ -236,7 +236,38 @@ func TestRunOncePrunesOncePerProfile(t *testing.T) {
 	}
 }
 
-func TestRunPruneJobSerializesOnRepository(t *testing.T) {
+func TestRunPruneJobSerializesSameAppRepository(t *testing.T) {
+	runtime := &lockingRuntime{release: make(chan struct{})}
+	profile := config.Profile{Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app", Password: "secret"}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if err := runPruneJob(context.Background(), runtime, Options{JobImage: "volust:latest"}, profile, "postgres"); err != nil {
+			t.Errorf("runPruneJob A returned error: %v", err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if err := runPruneJob(context.Background(), runtime, Options{JobImage: "volust:latest"}, profile, "postgres"); err != nil {
+			t.Errorf("runPruneJob B returned error: %v", err)
+		}
+	}()
+	for atomic.LoadInt32(&runtime.started) == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	if got := atomic.LoadInt32(&runtime.maxRunning); got != 1 {
+		t.Fatalf("prune jobs overlapped before release, maxRunning=%d", got)
+	}
+	close(runtime.release)
+	wg.Wait()
+	if got := atomic.LoadInt32(&runtime.maxRunning); got != 1 {
+		t.Fatalf("prune jobs overlapped, maxRunning=%d", got)
+	}
+}
+
+func TestRunPruneJobAllowsDifferentAppRepositories(t *testing.T) {
 	runtime := &lockingRuntime{release: make(chan struct{})}
 	profile := config.Profile{Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app", Password: "secret"}
 
@@ -254,16 +285,21 @@ func TestRunPruneJobSerializesOnRepository(t *testing.T) {
 			t.Errorf("runPruneJob B returned error: %v", err)
 		}
 	}()
-	for atomic.LoadInt32(&runtime.started) == 0 {
-		time.Sleep(time.Millisecond)
-	}
-	if got := atomic.LoadInt32(&runtime.maxRunning); got != 1 {
-		t.Fatalf("prune jobs overlapped before release, maxRunning=%d", got)
+	deadline := time.After(time.Second)
+	for atomic.LoadInt32(&runtime.started) < 2 {
+		select {
+		case <-deadline:
+			close(runtime.release)
+			wg.Wait()
+			t.Fatalf("different app prune jobs did not start concurrently, started=%d maxRunning=%d", atomic.LoadInt32(&runtime.started), atomic.LoadInt32(&runtime.maxRunning))
+		default:
+			time.Sleep(time.Millisecond)
+		}
 	}
 	close(runtime.release)
 	wg.Wait()
-	if got := atomic.LoadInt32(&runtime.maxRunning); got != 1 {
-		t.Fatalf("prune jobs overlapped, maxRunning=%d", got)
+	if got := atomic.LoadInt32(&runtime.maxRunning); got != 2 {
+		t.Fatalf("different app prune jobs did not overlap, maxRunning=%d", got)
 	}
 }
 
@@ -526,7 +562,7 @@ func TestRunSourceJobsSerializesSamePhysicalVolumeAcrossApps(t *testing.T) {
 	}
 }
 
-func TestRunSourceJobsSerializesSameRepositoryAcrossSources(t *testing.T) {
+func TestRunSourceJobsSerializesSameAppRepositoryAcrossSources(t *testing.T) {
 	runtime := &lockingRuntime{release: make(chan struct{})}
 	profile := config.Profile{Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app", Password: "secret"}
 	specA := volustdocker.BackupSpec{
@@ -539,7 +575,7 @@ func TestRunSourceJobsSerializesSameRepositoryAcrossSources(t *testing.T) {
 		}},
 	}
 	specB := volustdocker.BackupSpec{
-		Name:    "redis",
+		Name:    "postgres",
 		Profile: "s3prod",
 		Sources: []volustdocker.Source{{
 			ID:         "data",
@@ -575,10 +611,10 @@ func TestRunSourceJobsSerializesSameRepositoryAcrossSources(t *testing.T) {
 	}
 }
 
-func TestRunSourceJobsAllowsDifferentRepositoriesToRunConcurrently(t *testing.T) {
+func TestRunSourceJobsAllowsDifferentAppRepositoriesToRunConcurrently(t *testing.T) {
 	runtime := &lockingRuntime{release: make(chan struct{})}
-	profileA := config.Profile{Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app-a", Password: "secret"}
-	profileB := config.Profile{Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app-b", Password: "secret"}
+	profileA := config.Profile{Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app", Password: "secret"}
+	profileB := config.Profile{Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app", Password: "secret"}
 	specA := volustdocker.BackupSpec{
 		Name:    "postgres",
 		Profile: "s3prod-a",
@@ -618,7 +654,7 @@ func TestRunSourceJobsAllowsDifferentRepositoriesToRunConcurrently(t *testing.T)
 		case <-deadline:
 			close(runtime.release)
 			wg.Wait()
-			t.Fatalf("second repository job did not start concurrently, started=%d maxRunning=%d", atomic.LoadInt32(&runtime.started), atomic.LoadInt32(&runtime.maxRunning))
+			t.Fatalf("second app repository job did not start concurrently, started=%d maxRunning=%d", atomic.LoadInt32(&runtime.started), atomic.LoadInt32(&runtime.maxRunning))
 		default:
 			time.Sleep(time.Millisecond)
 		}
@@ -626,11 +662,11 @@ func TestRunSourceJobsAllowsDifferentRepositoriesToRunConcurrently(t *testing.T)
 	close(runtime.release)
 	wg.Wait()
 	if got := atomic.LoadInt32(&runtime.maxRunning); got != 2 {
-		t.Fatalf("different repository jobs did not overlap, maxRunning=%d", got)
+		t.Fatalf("different app repository jobs did not overlap, maxRunning=%d", got)
 	}
 }
 
-func TestRunSourceJobsLimitsGlobalWritesAcrossRepositories(t *testing.T) {
+func TestRunSourceJobsLimitsWritesPerBackend(t *testing.T) {
 	runtime := &lockingRuntime{release: make(chan struct{})}
 	limiter := NewWriteLimiter(2)
 	profiles := []config.Profile{
@@ -661,7 +697,7 @@ func TestRunSourceJobsLimitsGlobalWritesAcrossRepositories(t *testing.T) {
 		case <-deadline:
 			close(runtime.release)
 			wg.Wait()
-			t.Fatalf("two jobs did not start under global limit, started=%d maxRunning=%d", atomic.LoadInt32(&runtime.started), atomic.LoadInt32(&runtime.maxRunning))
+			t.Fatalf("two jobs did not start under backend limit, started=%d maxRunning=%d", atomic.LoadInt32(&runtime.started), atomic.LoadInt32(&runtime.maxRunning))
 		default:
 			time.Sleep(time.Millisecond)
 		}
@@ -669,7 +705,7 @@ func TestRunSourceJobsLimitsGlobalWritesAcrossRepositories(t *testing.T) {
 	if got := atomic.LoadInt32(&runtime.maxRunning); got != 2 {
 		close(runtime.release)
 		wg.Wait()
-		t.Fatalf("global limit did not allow exactly two jobs before release, maxRunning=%d", got)
+		t.Fatalf("backend limit did not allow exactly two jobs before release, maxRunning=%d", got)
 	}
 	if got := atomic.LoadInt32(&runtime.started); got != 2 {
 		close(runtime.release)
@@ -679,7 +715,47 @@ func TestRunSourceJobsLimitsGlobalWritesAcrossRepositories(t *testing.T) {
 	close(runtime.release)
 	wg.Wait()
 	if got := atomic.LoadInt32(&runtime.maxRunning); got != 2 {
-		t.Fatalf("jobs exceeded global limit, maxRunning=%d", got)
+		t.Fatalf("jobs exceeded backend limit, maxRunning=%d", got)
+	}
+}
+
+func TestRunSourceJobsAllowsDifferentBackendsToRunConcurrently(t *testing.T) {
+	runtime := &lockingRuntime{release: make(chan struct{})}
+	limiter := NewWriteLimiter(1)
+	profileA := config.Profile{Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket-a/volust", Password: "secret"}
+	profileB := config.Profile{Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket-b/volust", Password: "secret"}
+	specA := volustdocker.BackupSpec{Name: "postgres", Profile: "s3prod-a", Sources: []volustdocker.Source{{ID: "data", Type: "volume", VolumeName: "pgdata"}}}
+	specB := volustdocker.BackupSpec{Name: "redis", Profile: "s3prod-b", Sources: []volustdocker.Source{{ID: "data", Type: "volume", VolumeName: "redisdata"}}}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if _, err := RunSourceJobs(context.Background(), runtime, Options{JobImage: "volust:latest", WriteLimiter: limiter}, profileA, specA, specA.Sources[0], false); err != nil {
+			t.Errorf("RunSourceJobs A returned error: %v", err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if _, err := RunSourceJobs(context.Background(), runtime, Options{JobImage: "volust:latest", WriteLimiter: limiter}, profileB, specB, specB.Sources[0], false); err != nil {
+			t.Errorf("RunSourceJobs B returned error: %v", err)
+		}
+	}()
+	deadline := time.After(time.Second)
+	for atomic.LoadInt32(&runtime.started) < 2 {
+		select {
+		case <-deadline:
+			close(runtime.release)
+			wg.Wait()
+			t.Fatalf("different backend jobs did not start concurrently, started=%d maxRunning=%d", atomic.LoadInt32(&runtime.started), atomic.LoadInt32(&runtime.maxRunning))
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	close(runtime.release)
+	wg.Wait()
+	if got := atomic.LoadInt32(&runtime.maxRunning); got != 2 {
+		t.Fatalf("different backend jobs did not overlap, maxRunning=%d", got)
 	}
 }
 
@@ -691,7 +767,7 @@ func TestWriteLimiterCoordinatesAcrossInstances(t *testing.T) {
 	started := make(chan struct{})
 	firstDone := make(chan error, 1)
 	go func() {
-		firstDone <- first.With(context.Background(), func() error {
+		firstDone <- first.WithDefault(context.Background(), func() error {
 			close(started)
 			<-release
 			return nil
@@ -701,7 +777,7 @@ func TestWriteLimiterCoordinatesAcrossInstances(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	err := second.With(ctx, func() error {
+	err := second.WithDefault(ctx, func() error {
 		t.Fatal("second limiter instance acquired the only slot while first held it")
 		return nil
 	})
@@ -714,8 +790,40 @@ func TestWriteLimiterCoordinatesAcrossInstances(t *testing.T) {
 	if err := <-firstDone; err != nil {
 		t.Fatalf("first With returned error: %v", err)
 	}
-	if err := second.With(context.Background(), func() error { return nil }); err != nil {
+	if err := second.WithDefault(context.Background(), func() error { return nil }); err != nil {
 		t.Fatalf("second With after release returned error: %v", err)
+	}
+}
+
+func TestWriteLimiterUsesLockTimeoutForWaiting(t *testing.T) {
+	t.Setenv("VOLUST_LOCK_TIMEOUT", "25ms")
+	lockDir := t.TempDir()
+	first := NewWriteLimiterWithDir(1, lockDir)
+	second := NewWriteLimiterWithDir(1, lockDir)
+	release := make(chan struct{})
+	started := make(chan struct{})
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- first.With(context.Background(), "backend", func() error {
+			close(started)
+			<-release
+			return nil
+		})
+	}()
+	<-started
+
+	err := second.With(context.Background(), "backend", func() error {
+		t.Fatal("second limiter instance acquired the only backend slot")
+		return nil
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		close(release)
+		<-firstDone
+		t.Fatalf("second With error = %v, want context deadline exceeded", err)
+	}
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first With returned error: %v", err)
 	}
 }
 
@@ -766,7 +874,7 @@ func TestWriteLimiterProcessHelper(t *testing.T) {
 	limiter := NewWriteLimiterWithDir(1, dir)
 	switch mode {
 	case "hold":
-		err := limiter.With(context.Background(), func() error {
+		err := limiter.WithDefault(context.Background(), func() error {
 			if err := os.WriteFile(os.Getenv("VOLUST_WRITE_LIMITER_READY"), []byte("ready"), 0o600); err != nil {
 				return err
 			}
@@ -779,7 +887,7 @@ func TestWriteLimiterProcessHelper(t *testing.T) {
 	case "timeout":
 		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		defer cancel()
-		err := limiter.With(ctx, func() error {
+		err := limiter.WithDefault(ctx, func() error {
 			t.Fatal("timeout helper acquired the only slot while another process held it")
 			return nil
 		})
@@ -805,12 +913,12 @@ func waitForFile(t *testing.T, path string) {
 	}
 }
 
-func TestRunSourceJobsStillSerializesSameRepositoryBeforeGlobalWriteLimit(t *testing.T) {
+func TestRunSourceJobsStillSerializesSameAppRepositoryBeforeBackendWriteLimit(t *testing.T) {
 	runtime := &lockingRuntime{release: make(chan struct{})}
 	limiter := NewWriteLimiter(4)
 	profile := config.Profile{Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app", Password: "secret"}
 	specA := volustdocker.BackupSpec{Name: "postgres", Profile: "s3prod", Sources: []volustdocker.Source{{ID: "data", Type: "volume", VolumeName: "pgdata"}}}
-	specB := volustdocker.BackupSpec{Name: "redis", Profile: "s3prod", Sources: []volustdocker.Source{{ID: "data", Type: "volume", VolumeName: "redisdata"}}}
+	specB := volustdocker.BackupSpec{Name: "postgres", Profile: "s3prod", Sources: []volustdocker.Source{{ID: "config", Type: "volume", VolumeName: "pgconfig"}}}
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -830,16 +938,16 @@ func TestRunSourceJobsStillSerializesSameRepositoryBeforeGlobalWriteLimit(t *tes
 		time.Sleep(time.Millisecond)
 	}
 	if got := atomic.LoadInt32(&runtime.maxRunning); got != 1 {
-		t.Fatalf("same repository jobs overlapped before release, maxRunning=%d", got)
+		t.Fatalf("same app repository jobs overlapped before release, maxRunning=%d", got)
 	}
 	close(runtime.release)
 	wg.Wait()
 	if got := atomic.LoadInt32(&runtime.maxRunning); got != 1 {
-		t.Fatalf("same repository jobs overlapped, maxRunning=%d", got)
+		t.Fatalf("same app repository jobs overlapped, maxRunning=%d", got)
 	}
 }
 
-func TestRepositoryLockKeyUsesWebDAVEndpointInsteadOfProfileAlias(t *testing.T) {
+func TestRepositoryLockKeyUsesAppRepository(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	body := []byte(`
 profiles:
@@ -870,14 +978,29 @@ profiles:
 		t.Fatalf("Load returned error: %v", err)
 	}
 
-	keyA := RepositoryLockKey(cfg.Profiles["dav-a"])
-	keyB := RepositoryLockKey(cfg.Profiles["dav-b"])
-	keyC := RepositoryLockKey(cfg.Profiles["dav-c"])
+	keyA := RepositoryLockKey(cfg.Profiles["dav-a"], "postgres")
+	keyB := RepositoryLockKey(cfg.Profiles["dav-b"], "postgres")
+	keyC := RepositoryLockKey(cfg.Profiles["dav-c"], "postgres")
 	if keyA != keyB {
-		t.Fatalf("same WebDAV endpoint should share repository lock: %q != %q", keyA, keyB)
+		t.Fatalf("same WebDAV app repository should share repository lock: %q != %q", keyA, keyB)
 	}
 	if keyA == keyC {
-		t.Fatalf("different WebDAV paths should not share repository lock: %q", keyA)
+		t.Fatalf("different WebDAV app repositories should not share repository lock: %q", keyA)
+	}
+	if keyA == RepositoryLockKey(cfg.Profiles["dav-a"], "redis") {
+		t.Fatalf("different apps should not share repository lock: %q", keyA)
+	}
+}
+
+func TestBackendWriteKeyIgnoresAppRepositoryPath(t *testing.T) {
+	profileA := config.Profile{Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/volust/postgres"}
+	profileB := config.Profile{Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/other/redis"}
+	profileC := config.Profile{Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/other/volust/postgres"}
+	if BackendWriteKey(profileA) != BackendWriteKey(profileB) {
+		t.Fatalf("same S3 endpoint and bucket should share backend key: %q != %q", BackendWriteKey(profileA), BackendWriteKey(profileB))
+	}
+	if BackendWriteKey(profileA) == BackendWriteKey(profileC) {
+		t.Fatalf("different S3 bucket should not share backend key: %q", BackendWriteKey(profileA))
 	}
 }
 

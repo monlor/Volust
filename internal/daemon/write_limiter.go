@@ -33,15 +33,25 @@ func (l *WriteLimiter) Capacity() int {
 	return l.max
 }
 
-func (l *WriteLimiter) With(ctx context.Context, fn func() error) error {
+func (l *WriteLimiter) WithDefault(ctx context.Context, fn func() error) error {
+	return l.With(ctx, "default", fn)
+}
+
+func (l *WriteLimiter) With(ctx context.Context, key string, fn func() error) error {
 	if l == nil || l.max <= 0 {
 		return fn()
 	}
-	if err := os.MkdirAll(l.dir, 0o700); err != nil {
+	if key == "" {
+		key = "default"
+	}
+	waitCtx, cancel := lockWaitContext(ctx)
+	defer cancel()
+	dir := filepath.Join(l.dir, lockFileName(key))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	for {
-		release, err := l.tryAcquire()
+		release, err := l.tryAcquire(dir)
 		if err != nil {
 			return err
 		}
@@ -50,8 +60,8 @@ func (l *WriteLimiter) With(ctx context.Context, fn func() error) error {
 			return fn()
 		}
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
+		case <-waitCtx.Done():
+			return waitCtx.Err()
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
@@ -64,9 +74,9 @@ var writeSlotLocks = struct {
 	locks map[string]*sync.Mutex
 }{locks: map[string]*sync.Mutex{}}
 
-func (l *WriteLimiter) tryAcquire() (writeSlotRelease, error) {
+func (l *WriteLimiter) tryAcquire(dir string) (writeSlotRelease, error) {
 	for slot := 0; slot < l.max; slot++ {
-		release, err := l.tryAcquireSlot(slot)
+		release, err := l.tryAcquireSlot(dir, slot)
 		if err != nil {
 			return nil, err
 		}
@@ -77,8 +87,8 @@ func (l *WriteLimiter) tryAcquire() (writeSlotRelease, error) {
 	return nil, nil
 }
 
-func (l *WriteLimiter) tryAcquireSlot(slot int) (writeSlotRelease, error) {
-	path := filepath.Join(l.dir, fmt.Sprintf("slot-%d.lock", slot))
+func (l *WriteLimiter) tryAcquireSlot(dir string, slot int) (writeSlotRelease, error) {
+	path := filepath.Join(dir, fmt.Sprintf("slot-%d.lock", slot))
 	local := writeSlotLocalLock(path)
 	if !local.TryLock() {
 		return nil, nil
