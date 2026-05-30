@@ -97,15 +97,16 @@ Restore interactively using the existing Volust container:
 docker exec -it volust volust restore
 ```
 
-Volust lists discovered applications and sources, then asks you to confirm the destructive restore.
+Volust first asks whether to restore one source or all discovered Docker named volumes. Restoring one source lists discovered applications and sources, then asks you to confirm the destructive restore. Restoring all volumes prints every selected `app/source -> volume` before confirmation.
 
 You can also pass parameters directly:
 
 ```bash
 docker exec -it volust volust restore --profile default --app my-app --source data --snapshot latest
+docker exec -it volust volust restore --profile default --all-volumes --snapshot latest
 ```
 
-Restore is destructive. Volust prints a confirmation phrase and will not start the restore job until you type it exactly. By default, restore first stops the application container only if it is currently running, runs a safety backup for the selected source, restores the selected snapshot, and then restores the container to its previous running state. A container that was stopped before restore stays stopped. Use `--skip-pre-backup` only when you explicitly do not want the safety backup.
+Restore is destructive. Volust prints a confirmation phrase and will not start the restore job until you type it exactly. Single-source restore uses `RESTORE <app>/<source>`. All-volume restore uses `RESTORE ALL VOLUMES`, restores only Volust-discovered named volume sources, and excludes bind mounts. By default, restore first stops containers that are currently using the selected volume, runs a safety backup for the selected source, restores the selected snapshot, and then restores containers to their previous running state. A container that was stopped before restore stays stopped. Use `--skip-pre-backup` only when you explicitly do not want the safety backup.
 
 ## Docker Compose
 

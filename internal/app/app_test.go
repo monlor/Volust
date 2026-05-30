@@ -484,7 +484,7 @@ func TestRunRestorePromptsForMissingAppAndSource(t *testing.T) {
 	}()
 
 	var out bytes.Buffer
-	input := strings.NewReader("1\nRESTORE postgres/config\n")
+	input := strings.NewReader("1\n1\nRESTORE postgres/config\n")
 	err := Run([]string{"restore", "--skip-pre-backup"}, input, &out)
 	if err != nil {
 		t.Fatalf("Run returned error: %v\noutput: %s", err, out.String())
@@ -495,8 +495,182 @@ func TestRunRestorePromptsForMissingAppAndSource(t *testing.T) {
 	if fake.jobs[1].Name != "volust-restore-postgres-config" {
 		t.Fatalf("job name = %q", fake.jobs[1].Name)
 	}
-	if !strings.Contains(out.String(), "Select application") || !strings.Contains(out.String(), "Select source") {
+	if !strings.Contains(out.String(), "Select restore mode") || !strings.Contains(out.String(), "Select application") || !strings.Contains(out.String(), "Select source") {
 		t.Fatalf("interactive output = %q", out.String())
+	}
+}
+
+func TestRunRestoreAllVolumesInteractivelyRestoresNamedVolumes(t *testing.T) {
+	path := writeConfig(t)
+	fake := &appFakeRuntime{
+		containers: []volustdocker.Container{
+			{
+				ID:      "pg",
+				Name:    "/postgres",
+				Running: true,
+				Labels: map[string]string{
+					"volust.enabled":  "true",
+					"volust.profile":  "s3prod",
+					"volust.sources":  "/data,/cache",
+					"volust.schedule": "0 3 * * *",
+				},
+				Mounts: []volustdocker.Mount{
+					{Type: "volume", Name: "pgdata", Destination: "/data"},
+					{Type: "bind", Source: "/srv/postgres/cache", Destination: "/cache"},
+				},
+			},
+			{
+				ID:      "redis",
+				Name:    "/redis",
+				Running: true,
+				Labels: map[string]string{
+					"volust.enabled":  "true",
+					"volust.profile":  "s3prod",
+					"volust.sources":  "/data",
+					"volust.schedule": "0 3 * * *",
+				},
+				Mounts: []volustdocker.Mount{{Type: "volume", Name: "redisdata", Destination: "/data"}},
+			},
+		},
+		snapshotOutput: `[
+			{"short_id":"pg-snap","id":"pg-snap","time":"2026-01-02T00:00:00Z","tags":["volust","app:postgres","profile:s3prod","source:data"]},
+			{"short_id":"redis-snap","id":"redis-snap","time":"2026-01-02T00:00:00Z","tags":["volust","app:redis","profile:s3prod","source:data"]}
+		]`,
+	}
+	oldRuntime := newRuntime
+	newRuntime = func() (daemonRuntime, error) {
+		return fake, nil
+	}
+	defer func() {
+		newRuntime = oldRuntime
+	}()
+
+	var out bytes.Buffer
+	err := Run([]string{"restore", "--config", path, "--profile", "s3prod", "--skip-pre-backup"}, strings.NewReader("2\nRESTORE ALL VOLUMES\n"), &out)
+	if err != nil {
+		t.Fatalf("Run returned error: %v\noutput: %s", err, out.String())
+	}
+	want := []string{"job:snapshots", "job:snapshots", "stop:pg", "job:restore", "start:pg", "stop:redis", "job:restore", "start:redis"}
+	if !equalStrings(fake.events, want) {
+		t.Fatalf("events = %#v, want %#v", fake.events, want)
+	}
+	output := out.String()
+	for _, want := range []string{"Select restore mode", "Volumes: 2", "postgres/data -> pgdata", "redis/data -> redisdata", "restore jobs completed: volumes=2"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output %q does not contain %q", output, want)
+		}
+	}
+	for _, job := range fake.jobs {
+		if strings.Contains(strings.Join(job.Args, " "), "/srv/postgres/cache") {
+			t.Fatalf("bind source was restored: %#v", fake.jobs)
+		}
+	}
+}
+
+func TestRunRestoreAllVolumesFlagBypassesModePrompt(t *testing.T) {
+	path := writeConfig(t)
+	fake := &appFakeRuntime{
+		containers: []volustdocker.Container{{
+			ID:   "pg",
+			Name: "/postgres",
+			Labels: map[string]string{
+				"volust.enabled":  "true",
+				"volust.profile":  "s3prod",
+				"volust.sources":  "/data",
+				"volust.schedule": "0 3 * * *",
+			},
+			Mounts: []volustdocker.Mount{{Type: "volume", Name: "pgdata", Destination: "/data"}},
+		}},
+	}
+	oldRuntime := newRuntime
+	newRuntime = func() (daemonRuntime, error) {
+		return fake, nil
+	}
+	defer func() {
+		newRuntime = oldRuntime
+	}()
+
+	var out bytes.Buffer
+	err := Run([]string{"restore", "--config", path, "--profile", "s3prod", "--all-volumes", "--skip-pre-backup"}, strings.NewReader("RESTORE ALL VOLUMES\n"), &out)
+	if err != nil {
+		t.Fatalf("Run returned error: %v\noutput: %s", err, out.String())
+	}
+	if strings.Contains(out.String(), "Select restore mode") {
+		t.Fatalf("all-volumes flag should not prompt for mode: %q", out.String())
+	}
+	if !equalStrings(fake.events, []string{"job:snapshots", "job:restore"}) {
+		t.Fatalf("events = %#v", fake.events)
+	}
+}
+
+func TestRunRestoreAllVolumesConfirmationMismatchPreventsWork(t *testing.T) {
+	path := writeConfig(t)
+	fake := &appFakeRuntime{
+		containers: []volustdocker.Container{{
+			ID:   "pg",
+			Name: "/postgres",
+			Labels: map[string]string{
+				"volust.enabled":  "true",
+				"volust.profile":  "s3prod",
+				"volust.sources":  "/data",
+				"volust.schedule": "0 3 * * *",
+			},
+			Mounts: []volustdocker.Mount{{Type: "volume", Name: "pgdata", Destination: "/data"}},
+		}},
+	}
+	oldRuntime := newRuntime
+	newRuntime = func() (daemonRuntime, error) {
+		return fake, nil
+	}
+	defer func() {
+		newRuntime = oldRuntime
+	}()
+
+	var out bytes.Buffer
+	err := Run([]string{"restore", "--config", path, "--profile", "s3prod", "--all-volumes"}, strings.NewReader("no\n"), &out)
+	if err == nil {
+		t.Fatal("Run succeeded without confirmation phrase")
+	}
+	if len(fake.events) != 0 {
+		t.Fatalf("events = %#v, want no work before confirmation", fake.events)
+	}
+}
+
+func TestRunRestoreAllVolumesPreflightFailurePreventsDestructiveWork(t *testing.T) {
+	path := writeConfig(t)
+	fake := &appFakeRuntime{
+		containers: []volustdocker.Container{{
+			ID:      "pg",
+			Name:    "/postgres",
+			Running: true,
+			Labels: map[string]string{
+				"volust.enabled":  "true",
+				"volust.profile":  "s3prod",
+				"volust.sources":  "/data",
+				"volust.schedule": "0 3 * * *",
+			},
+			Mounts: []volustdocker.Mount{{Type: "volume", Name: "pgdata", Destination: "/data"}},
+		}},
+		snapshotOutput: `[]`,
+	}
+	oldRuntime := newRuntime
+	newRuntime = func() (daemonRuntime, error) {
+		return fake, nil
+	}
+	defer func() {
+		newRuntime = oldRuntime
+	}()
+
+	var out bytes.Buffer
+	err := Run([]string{"restore", "--config", path, "--profile", "s3prod", "--all-volumes"}, strings.NewReader("RESTORE ALL VOLUMES\n"), &out)
+	if err == nil {
+		t.Fatal("Run succeeded without a matching snapshot")
+	}
+	if !strings.Contains(err.Error(), "no matching snapshot found") {
+		t.Fatalf("error = %v", err)
+	}
+	if !equalStrings(fake.events, []string{"job:snapshots"}) {
+		t.Fatalf("events = %#v, want only snapshot preflight", fake.events)
 	}
 }
 

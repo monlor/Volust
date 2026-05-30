@@ -241,6 +241,7 @@ func runRestore(args []string, in io.Reader, out io.Writer) error {
 	source := fs.String("source", "", "source id")
 	snapshot := fs.String("snapshot", "latest", "snapshot id")
 	skipPreBackup := fs.Bool("skip-pre-backup", false, "skip safety backup before restore")
+	allVolumes := fs.Bool("all-volumes", false, "restore all discovered Docker named volume sources")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -257,6 +258,17 @@ func runRestore(args []string, in io.Reader, out io.Writer) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	if !*allVolumes && *appName == "" && *source == "" {
+		mode, err := promptChoice(reader, out, "Select restore mode", []string{"Restore one source", "Restore all volumes"})
+		if err != nil {
+			return err
+		}
+		*allVolumes = mode == "Restore all volumes"
+	}
+	if *allVolumes {
+		return runRestoreAllVolumes(ctx, runtime, cfg, *profile, *snapshot, *skipPreBackup, reader, out)
+	}
+
 	selected, err := resolveRestoreSelection(ctx, runtime, cfg, *profile, *appName, *source, reader, out)
 	if err != nil {
 		return err
@@ -266,10 +278,8 @@ func runRestore(args []string, in io.Reader, out io.Writer) error {
 
 	phrase := "RESTORE " + *appName + "/" + *source
 	fmt.Fprintf(out, "Profile: %s\nApplication: %s\nSource: %s\nSnapshot: %s\n", *profile, *appName, *source, *snapshot)
-	fmt.Fprintf(out, "This restore is destructive. Type %q to continue: ", phrase)
-	answer, _ := reader.ReadString('\n')
-	if strings.TrimSpace(answer) != phrase {
-		return errors.New("restore confirmation phrase did not match")
+	if err := confirmRestore(reader, out, phrase); err != nil {
+		return err
 	}
 
 	profileCfg := cfg.Profiles[*profile]
@@ -277,31 +287,98 @@ func runRestore(args []string, in io.Reader, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	err = daemon.WithSourceLock(ctx, daemon.RepositoryLockKey(profileCfg, *appName), func() error {
-		return daemon.WithSourceLock(ctx, daemon.SourceLockKey(*profile, selected.Spec, selected.Source), func() error {
-			resolvedSnapshot, err := resolveSnapshot(ctx, runtime, profileCfg, restic.RestoreRequest{
-				SnapshotID: *snapshot,
-				App:        *appName,
-				Profile:    *profile,
-				SourceID:   *source,
-			})
-			if err != nil {
-				return err
-			}
-			return limiter.With(ctx, daemon.BackendWriteKey(profileCfg), func() error {
-				stopped, err := stopMountedContainers(ctx, runtime, selected)
-				if err != nil {
-					return err
-				}
-				return restoreWithStoppedContainers(ctx, runtime, cfg, *profile, *appName, *source, resolvedSnapshot, *skipPreBackup, selected, stopped)
-			})
-		})
+	resolvedSnapshot, err := resolveSnapshot(ctx, runtime, profileCfg, restic.RestoreRequest{
+		SnapshotID: *snapshot,
+		App:        *appName,
+		Profile:    *profile,
+		SourceID:   *source,
 	})
+	if err != nil {
+		return err
+	}
+	err = restoreCandidateWithSnapshot(ctx, runtime, cfg, *profile, selected, resolvedSnapshot, *skipPreBackup, limiter)
 	if err != nil {
 		return err
 	}
 	fmt.Fprintln(out, "restore job completed")
 	return nil
+}
+
+func runRestoreAllVolumes(ctx context.Context, runtime daemonRuntime, cfg config.Config, profileName, snapshotID string, skipPreBackup bool, reader *bufio.Reader, out io.Writer) error {
+	selected, err := resolveAllVolumeRestoreSelection(ctx, runtime, cfg, profileName)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "Profile: %s\nSnapshot: %s\nVolumes: %d\n", profileName, snapshotID, len(selected))
+	for _, candidate := range selected {
+		fmt.Fprintf(out, "  %s/%s -> %s\n", candidate.Spec.Name, candidate.Source.ID, candidate.Source.VolumeName)
+	}
+	if err := confirmRestore(reader, out, "RESTORE ALL VOLUMES"); err != nil {
+		return err
+	}
+
+	profileCfg := cfg.Profiles[profileName]
+	resolved, err := resolveRestoreSnapshots(ctx, runtime, profileCfg, profileName, snapshotID, selected)
+	if err != nil {
+		return err
+	}
+	limiter, err := maxConcurrentWritesLimiter()
+	if err != nil {
+		return err
+	}
+	for _, candidate := range selected {
+		key := restoreSnapshotKey(candidate)
+		if err := restoreCandidateWithSnapshot(ctx, runtime, cfg, profileName, candidate, resolved[key], skipPreBackup, limiter); err != nil {
+			return err
+		}
+	}
+	fmt.Fprintf(out, "restore jobs completed: volumes=%d\n", len(selected))
+	return nil
+}
+
+func confirmRestore(reader *bufio.Reader, out io.Writer, phrase string) error {
+	fmt.Fprintf(out, "This restore is destructive. Type %q to continue: ", phrase)
+	answer, _ := reader.ReadString('\n')
+	if strings.TrimSpace(answer) != phrase {
+		return errors.New("restore confirmation phrase did not match")
+	}
+	return nil
+}
+
+func resolveRestoreSnapshots(ctx context.Context, runtime daemonRuntime, profile config.Profile, profileName, snapshotID string, selected []restoreCandidate) (map[string]string, error) {
+	resolved := make(map[string]string, len(selected))
+	for _, candidate := range selected {
+		snapshot, err := resolveSnapshot(ctx, runtime, profile, restic.RestoreRequest{
+			SnapshotID: snapshotID,
+			App:        candidate.Spec.Name,
+			Profile:    profileName,
+			SourceID:   candidate.Source.ID,
+		})
+		if err != nil {
+			return nil, err
+		}
+		resolved[restoreSnapshotKey(candidate)] = snapshot
+	}
+	return resolved, nil
+}
+
+func restoreSnapshotKey(candidate restoreCandidate) string {
+	return candidate.Spec.Name + "\x00" + candidate.Source.ID
+}
+
+func restoreCandidateWithSnapshot(ctx context.Context, runtime daemonRuntime, cfg config.Config, profileName string, selected restoreCandidate, snapshotID string, skipPreBackup bool, limiter *daemon.WriteLimiter) error {
+	profileCfg := cfg.Profiles[profileName]
+	return daemon.WithSourceLock(ctx, daemon.RepositoryLockKey(profileCfg, selected.Spec.Name), func() error {
+		return daemon.WithSourceLock(ctx, daemon.SourceLockKey(profileName, selected.Spec, selected.Source), func() error {
+			return limiter.With(ctx, daemon.BackendWriteKey(profileCfg), func() error {
+				stopped, err := stopMountedContainers(ctx, runtime, selected)
+				if err != nil {
+					return err
+				}
+				return restoreWithStoppedContainers(ctx, runtime, cfg, profileName, selected.Spec.Name, selected.Source.ID, snapshotID, skipPreBackup, selected, stopped)
+			})
+		})
+	})
 }
 
 func loadConfigAndProfile(configPath, profileName string) (config.Config, string, error) {
@@ -514,6 +591,33 @@ func resolveRestoreSelection(ctx context.Context, runtime daemonRuntime, cfg con
 		}
 	}
 	return restoreCandidate{}, fmt.Errorf("restore source not found for profile=%s app=%s source=%s", profileName, appName, sourceID)
+}
+
+func resolveAllVolumeRestoreSelection(ctx context.Context, runtime daemonRuntime, cfg config.Config, profileName string) ([]restoreCandidate, error) {
+	candidates, err := restoreCandidates(ctx, runtime, cfg, profileName)
+	if err != nil {
+		return nil, err
+	}
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("no restore candidates found for profile=%s", profileName)
+	}
+	seen := map[string]bool{}
+	var selected []restoreCandidate
+	for _, candidate := range candidates {
+		if candidate.Source.Type != "volume" || candidate.Source.VolumeName == "" {
+			continue
+		}
+		key := restoreSnapshotKey(candidate)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		selected = append(selected, candidate)
+	}
+	if len(selected) == 0 {
+		return nil, fmt.Errorf("no volume restore candidates found for profile=%s", profileName)
+	}
+	return selected, nil
 }
 
 func restoreCandidates(ctx context.Context, runtime daemonRuntime, cfg config.Config, profileName string) ([]restoreCandidate, error) {
