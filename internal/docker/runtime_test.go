@@ -9,18 +9,7 @@ import (
 	"testing"
 )
 
-func TestEntrypointAndCmdOverrideImageEntrypoint(t *testing.T) {
-	entrypoint, cmd := entrypointAndCmd([]string{"restic", "-r", "repo", "backup", "/data"})
-	if len(entrypoint) != 1 || entrypoint[0] != "restic" {
-		t.Fatalf("entrypoint = %#v", entrypoint)
-	}
-	wantCmd := []string{"-r", "repo", "backup", "/data"}
-	if !equalStrings(cmd, wantCmd) {
-		t.Fatalf("cmd = %#v, want %#v", cmd, wantCmd)
-	}
-}
-
-func TestRunJobFailureIncludesLogsAndDeletesContainer(t *testing.T) {
+func TestRunWorkerFailureIncludesExecOutputAndDeletesContainer(t *testing.T) {
 	var autoRemove bool
 	var deleted bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -31,14 +20,19 @@ func TestRunJobFailureIncludesLogsAndDeletesContainer(t *testing.T) {
 				t.Fatalf("decode create request: %v", err)
 			}
 			autoRemove = request.HostConfig.AutoRemove
-			_ = json.NewEncoder(w).Encode(dockerCreateResponse{ID: "job123"})
-		case r.Method == http.MethodPost && r.URL.Path == "/containers/job123/start":
+			if len(request.HostConfig.Mounts) != 1 || request.HostConfig.Mounts[0].Target != "/volust/sources/postgres-1/data" {
+				t.Fatalf("mounts = %#v", request.HostConfig.Mounts)
+			}
+			_ = json.NewEncoder(w).Encode(dockerCreateResponse{ID: "worker123"})
+		case r.Method == http.MethodPost && r.URL.Path == "/containers/worker123/start":
 			w.WriteHeader(http.StatusNoContent)
-		case r.Method == http.MethodPost && r.URL.Path == "/containers/job123/wait":
-			_ = json.NewEncoder(w).Encode(dockerWaitResponse{StatusCode: 1})
-		case r.Method == http.MethodGet && r.URL.Path == "/containers/job123/logs":
+		case r.Method == http.MethodPost && r.URL.Path == "/containers/worker123/exec":
+			_ = json.NewEncoder(w).Encode(dockerExecCreateResponse{ID: "exec123"})
+		case r.Method == http.MethodPost && r.URL.Path == "/exec/exec123/start":
 			_, _ = w.Write([]byte("restic failed"))
-		case r.Method == http.MethodDelete && r.URL.Path == "/containers/job123":
+		case r.Method == http.MethodGet && r.URL.Path == "/exec/exec123/json":
+			_ = json.NewEncoder(w).Encode(dockerExecInspectResponse{ExitCode: 1})
+		case r.Method == http.MethodDelete && r.URL.Path == "/containers/worker123":
 			deleted = true
 			w.WriteHeader(http.StatusNoContent)
 		default:
@@ -48,38 +42,42 @@ func TestRunJobFailureIncludesLogsAndDeletesContainer(t *testing.T) {
 	defer server.Close()
 
 	runtime := &Runtime{client: server.Client(), host: server.URL}
-	err := runtime.RunJob(context.Background(), JobSpec{
+	err := runtime.RunWorker(context.Background(), WorkerSpec{
 		Name:  "backup",
 		Image: "volust:latest",
-		Args:  []string{"restic", "backup"},
+		Mounts: []JobMount{{
+			Type:     "volume",
+			Source:   "pgdata",
+			Target:   "/volust/sources/postgres-1/data",
+			ReadOnly: true,
+		}},
+		Commands: []WorkerCommand{{Operation: "backup", Args: []string{"restic", "backup"}}},
 	})
 	if err == nil {
-		t.Fatal("RunJob succeeded for failing container")
+		t.Fatal("RunWorker succeeded for failing command")
 	}
 	if autoRemove {
-		t.Fatal("RunJob created job with AutoRemove enabled")
+		t.Fatal("RunWorker created worker with AutoRemove enabled")
 	}
 	if !strings.Contains(err.Error(), "restic failed") {
-		t.Fatalf("RunJob error did not include logs: %v", err)
+		t.Fatalf("RunWorker error did not include exec output: %v", err)
 	}
 	if !deleted {
-		t.Fatal("RunJob did not delete failed container after reading logs")
+		t.Fatal("RunWorker did not delete worker after reading output")
 	}
 }
 
-func TestRunJobForceRemovesContainerWhenContextIsCanceled(t *testing.T) {
+func TestRunWorkerForceRemovesContainerWhenContextIsCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var deleteForce string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/containers/create"):
-			_ = json.NewEncoder(w).Encode(dockerCreateResponse{ID: "job123"})
-		case r.Method == http.MethodPost && r.URL.Path == "/containers/job123/start":
+			_ = json.NewEncoder(w).Encode(dockerCreateResponse{ID: "worker123"})
+		case r.Method == http.MethodPost && r.URL.Path == "/containers/worker123/start":
 			w.WriteHeader(http.StatusNoContent)
 			cancel()
-		case r.Method == http.MethodPost && r.URL.Path == "/containers/job123/wait":
-			<-r.Context().Done()
-		case r.Method == http.MethodDelete && r.URL.Path == "/containers/job123":
+		case r.Method == http.MethodDelete && r.URL.Path == "/containers/worker123":
 			deleteForce = r.URL.Query().Get("force")
 			w.WriteHeader(http.StatusNoContent)
 		default:
@@ -89,31 +87,37 @@ func TestRunJobForceRemovesContainerWhenContextIsCanceled(t *testing.T) {
 	defer server.Close()
 
 	runtime := &Runtime{client: server.Client(), host: server.URL}
-	err := runtime.RunJob(ctx, JobSpec{
-		Name:  "backup",
-		Image: "volust:latest",
-		Args:  []string{"restic", "backup"},
+	err := runtime.RunWorker(ctx, WorkerSpec{
+		Name:     "backup",
+		Image:    "volust:latest",
+		Commands: []WorkerCommand{{Operation: "backup", Args: []string{"restic", "backup"}}},
 	})
 	if err == nil {
-		t.Fatal("RunJob succeeded after context cancellation")
+		t.Fatal("RunWorker succeeded after context cancellation")
 	}
 	if deleteForce != "1" {
 		t.Fatalf("delete force query = %q", deleteForce)
 	}
 }
 
-func TestRunJobCreatesContainerWithUniqueName(t *testing.T) {
+func TestRunWorkerCreatesContainerWithUniqueNameAndExecsCommands(t *testing.T) {
 	var createdName string
+	execs := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/containers/create"):
 			createdName = r.URL.Query().Get("name")
-			_ = json.NewEncoder(w).Encode(dockerCreateResponse{ID: "job123"})
-		case r.Method == http.MethodPost && r.URL.Path == "/containers/job123/start":
+			_ = json.NewEncoder(w).Encode(dockerCreateResponse{ID: "worker123"})
+		case r.Method == http.MethodPost && r.URL.Path == "/containers/worker123/start":
 			w.WriteHeader(http.StatusNoContent)
-		case r.Method == http.MethodPost && r.URL.Path == "/containers/job123/wait":
-			_ = json.NewEncoder(w).Encode(dockerWaitResponse{StatusCode: 0})
-		case r.Method == http.MethodDelete && r.URL.Path == "/containers/job123":
+		case r.Method == http.MethodPost && r.URL.Path == "/containers/worker123/exec":
+			execs++
+			_ = json.NewEncoder(w).Encode(dockerExecCreateResponse{ID: "exec" + string(rune('0'+execs))})
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/exec/exec") && strings.HasSuffix(r.URL.Path, "/start"):
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/exec/exec") && strings.HasSuffix(r.URL.Path, "/json"):
+			_ = json.NewEncoder(w).Encode(dockerExecInspectResponse{ExitCode: 0})
+		case r.Method == http.MethodDelete && r.URL.Path == "/containers/worker123":
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			t.Fatalf("unexpected docker API call: %s %s", r.Method, r.URL.String())
@@ -122,32 +126,39 @@ func TestRunJobCreatesContainerWithUniqueName(t *testing.T) {
 	defer server.Close()
 
 	runtime := &Runtime{client: server.Client(), host: server.URL}
-	if err := runtime.RunJob(context.Background(), JobSpec{
+	if err := runtime.RunWorker(context.Background(), WorkerSpec{
 		Name:  "backup",
 		Image: "volust:latest",
-		Args:  []string{"restic", "backup"},
+		Commands: []WorkerCommand{
+			{Operation: "backup", Args: []string{"restic", "backup"}},
+			{Operation: "prune", Args: []string{"restic", "prune"}},
+		},
 	}); err != nil {
-		t.Fatalf("RunJob returned error: %v", err)
+		t.Fatalf("RunWorker returned error: %v", err)
 	}
 	if createdName == "backup" || !strings.HasPrefix(createdName, "backup-") {
 		t.Fatalf("created name = %q", createdName)
 	}
+	if execs != 2 {
+		t.Fatalf("execs = %d", execs)
+	}
 }
 
-func TestRunJobOutputCapturesOnlyStdoutOnSuccess(t *testing.T) {
-	var logsQuery string
+func TestRunWorkerOutputCapturesOnlyStdoutOnSuccess(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/containers/create"):
-			_ = json.NewEncoder(w).Encode(dockerCreateResponse{ID: "job123"})
-		case r.Method == http.MethodPost && r.URL.Path == "/containers/job123/start":
+			_ = json.NewEncoder(w).Encode(dockerCreateResponse{ID: "worker123"})
+		case r.Method == http.MethodPost && r.URL.Path == "/containers/worker123/start":
 			w.WriteHeader(http.StatusNoContent)
-		case r.Method == http.MethodPost && r.URL.Path == "/containers/job123/wait":
-			_ = json.NewEncoder(w).Encode(dockerWaitResponse{StatusCode: 0})
-		case r.Method == http.MethodGet && r.URL.Path == "/containers/job123/logs":
-			logsQuery = r.URL.RawQuery
-			_, _ = w.Write([]byte(`[{"id":"snap"}]`))
-		case r.Method == http.MethodDelete && r.URL.Path == "/containers/job123":
+		case r.Method == http.MethodPost && r.URL.Path == "/containers/worker123/exec":
+			_ = json.NewEncoder(w).Encode(dockerExecCreateResponse{ID: "exec123"})
+		case r.Method == http.MethodPost && r.URL.Path == "/exec/exec123/start":
+			_, _ = w.Write(frame(1, []byte(`[{"id":"snap"}]`)))
+			_, _ = w.Write(frame(2, []byte("notice\n")))
+		case r.Method == http.MethodGet && r.URL.Path == "/exec/exec123/json":
+			_ = json.NewEncoder(w).Encode(dockerExecInspectResponse{ExitCode: 0})
+		case r.Method == http.MethodDelete && r.URL.Path == "/containers/worker123":
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			t.Fatalf("unexpected docker API call: %s %s", r.Method, r.URL.String())
@@ -156,19 +167,16 @@ func TestRunJobOutputCapturesOnlyStdoutOnSuccess(t *testing.T) {
 	defer server.Close()
 
 	runtime := &Runtime{client: server.Client(), host: server.URL}
-	output, err := runtime.RunJobOutput(context.Background(), JobSpec{
-		Name:  "snapshots",
-		Image: "volust:latest",
-		Args:  []string{"restic", "snapshots", "--json"},
+	output, err := runtime.RunWorkerOutput(context.Background(), WorkerSpec{
+		Name:     "snapshots",
+		Image:    "volust:latest",
+		Commands: []WorkerCommand{{Operation: "snapshots", Args: []string{"restic", "snapshots", "--json"}}},
 	})
 	if err != nil {
-		t.Fatalf("RunJobOutput returned error: %v", err)
+		t.Fatalf("RunWorkerOutput returned error: %v", err)
 	}
 	if string(output) != `[{"id":"snap"}]` {
-		t.Fatalf("RunJobOutput output = %q", output)
-	}
-	if !strings.Contains(logsQuery, "stdout=1") || strings.Contains(logsQuery, "stderr=1") {
-		t.Fatalf("logs query = %q", logsQuery)
+		t.Fatalf("RunWorkerOutput output = %q", output)
 	}
 }
 
@@ -176,11 +184,14 @@ func TestDemuxDockerLogsSupportsRawAndFramedOutput(t *testing.T) {
 	if got := string(demuxDockerLogs([]byte("plain\n"))); got != "plain\n" {
 		t.Fatalf("raw logs = %q", got)
 	}
-	framed := []byte{1, 0, 0, 0, 0, 0, 0, 6}
-	framed = append(framed, []byte("hello\n")...)
+	framed := frame(1, []byte("hello\n"))
 	if got := string(demuxDockerLogs(framed)); got != "hello\n" {
 		t.Fatalf("framed logs = %q", got)
 	}
+}
+
+func frame(stream byte, payload []byte) []byte {
+	return append([]byte{stream, 0, 0, 0, byte(len(payload) >> 24), byte(len(payload) >> 16), byte(len(payload) >> 8), byte(len(payload))}, payload...)
 }
 
 func TestListContainersFiltersStoppedByDefault(t *testing.T) {

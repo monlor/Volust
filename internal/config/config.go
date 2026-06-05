@@ -158,20 +158,6 @@ func (p Profile) RepositoryString() string {
 	}
 }
 
-func (p Profile) RepositoryStringForApp(appName string) string {
-	appDir := AppRepositoryDir(appName)
-	switch p.Type {
-	case ProfileWebDAV:
-		base := strings.Trim(strings.TrimPrefix(p.Path, "/"), "/")
-		if base == "" {
-			return "rclone:" + p.rcloneRemoteName() + ":" + appDir
-		}
-		return "rclone:" + p.rcloneRemoteName() + ":" + base + "/" + appDir
-	default:
-		return strings.TrimRight(p.Repository, "/") + "/" + appDir
-	}
-}
-
 func (p Profile) BackendKey() string {
 	switch p.Type {
 	case ProfileWebDAV:
@@ -269,7 +255,7 @@ func (p Profile) ResticEnv() map[string]string {
 
 func (p Profile) validate(name string) error {
 	if p.Env["RESTIC_PASSWORD_FILE"] != "" {
-		return fmt.Errorf("profile %q: RESTIC_PASSWORD_FILE is not supported because job containers cannot access host-local password files; use RESTIC_PASSWORD or RESTIC_PASSWORD_COMMAND instead", name)
+		return fmt.Errorf("profile %q: RESTIC_PASSWORD_FILE is not supported because worker containers cannot access host-local password files; use RESTIC_PASSWORD or RESTIC_PASSWORD_COMMAND instead", name)
 	}
 	if !p.hasResticPassword() {
 		return fmt.Errorf("profile %q: restic password is required", name)

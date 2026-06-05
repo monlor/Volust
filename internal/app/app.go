@@ -22,13 +22,13 @@ import (
 	"github.com/monlor/volust/internal/restic"
 )
 
-const DefaultJobImage = "ghcr.io/monlor/volust:latest"
+const DefaultWorkerImage = "ghcr.io/monlor/volust:latest"
 
 type daemonRuntime interface {
 	daemon.Runtime
 	StopContainer(context.Context, string) error
 	StartContainer(context.Context, string) error
-	RunJobOutput(context.Context, volustdocker.JobSpec) ([]byte, error)
+	RunWorkerOutput(context.Context, volustdocker.WorkerSpec) ([]byte, error)
 }
 
 var newRuntime = func() (daemonRuntime, error) {
@@ -78,7 +78,7 @@ func runDaemon(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		report, err := daemon.RunOnce(context.Background(), cfg, runtime, daemon.Options{JobImage: jobImage(), IncludeStopped: includeStoppedContainers(), StopBeforeBackup: stopContainersBeforeBackup(), WriteLimiter: limiter})
+		report, err := daemon.RunOnce(context.Background(), cfg, runtime, daemon.Options{WorkerImage: workerImage(), IncludeStopped: includeStoppedContainers(), StopBeforeBackup: stopContainersBeforeBackup(), WriteLimiter: limiter})
 		if err != nil {
 			return err
 		}
@@ -96,7 +96,7 @@ func runDaemon(args []string, out io.Writer) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	fmt.Fprintln(out, "daemon mode: scheduling discovered label-backed jobs")
-	report, err := daemon.RunScheduler(ctx, cfg, runtime, daemon.Options{JobImage: jobImage(), LogWriter: out, IncludeStopped: includeStoppedContainers(), StopBeforeBackup: stopContainersBeforeBackup(), WriteLimiter: limiter})
+	report, err := daemon.RunScheduler(ctx, cfg, runtime, daemon.Options{WorkerImage: workerImage(), LogWriter: out, IncludeStopped: includeStoppedContainers(), StopBeforeBackup: stopContainersBeforeBackup(), WriteLimiter: limiter})
 	if err != nil && !errors.Is(err, context.Canceled) {
 		return err
 	}
@@ -165,6 +165,7 @@ func runSnapshots(args []string, in io.Reader, out io.Writer) error {
 	snapshots, err := querySnapshots(context.Background(), runtime, cfg.Profiles[profileName], restic.RestoreRequest{
 		SnapshotID: *snapshot,
 		App:        selected.Spec.Name,
+		Container:  selected.Spec.ContainerName,
 		Profile:    profileName,
 		SourceID:   selected.Source.ID,
 	})
@@ -213,21 +214,18 @@ func runBackup(args []string, in io.Reader, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	var jobsStarted int
-	for _, candidate := range selected {
-		if err := daemon.LoadExcludeFiles("/etc/volust/excludes", &candidate.Spec); err != nil {
-			return err
-		}
-		started, err := daemon.RunSourceJobs(context.Background(), runtime, daemon.Options{JobImage: jobImage(), StopBeforeBackup: stopContainersBeforeBackup(), WriteLimiter: limiter}, profileCfg, candidate.Spec, candidate.Source, false)
-		if err != nil {
-			return err
-		}
-		jobsStarted += started
-	}
-	if err := daemon.RunPruneJob(context.Background(), runtime, daemon.Options{JobImage: jobImage(), WriteLimiter: limiter}, profileCfg, selected[0].Spec.Name); err != nil {
+	spec := selected[0].Spec
+	if err := daemon.LoadExcludeFiles("/etc/volust/excludes", &spec); err != nil {
 		return err
 	}
-	jobsStarted++
+	sources := make([]volustdocker.Source, 0, len(selected))
+	for _, candidate := range selected {
+		sources = append(sources, candidate.Source)
+	}
+	jobsStarted, err := daemon.RunSpecJobs(context.Background(), runtime, daemon.Options{WorkerImage: workerImage(), StopBeforeBackup: stopContainersBeforeBackup(), WriteLimiter: limiter}, profileCfg, spec, sources, true)
+	if err != nil {
+		return err
+	}
 	fmt.Fprintf(out, "backup complete: app=%s sources=%d jobs_started=%d\n", selected[0].Spec.Name, len(selected), jobsStarted)
 	return nil
 }
@@ -290,6 +288,7 @@ func runRestore(args []string, in io.Reader, out io.Writer) error {
 	resolvedSnapshot, err := resolveSnapshot(ctx, runtime, profileCfg, restic.RestoreRequest{
 		SnapshotID: *snapshot,
 		App:        *appName,
+		Container:  selected.Spec.ContainerName,
 		Profile:    *profile,
 		SourceID:   *source,
 	})
@@ -351,6 +350,7 @@ func resolveRestoreSnapshots(ctx context.Context, runtime daemonRuntime, profile
 		snapshot, err := resolveSnapshot(ctx, runtime, profile, restic.RestoreRequest{
 			SnapshotID: snapshotID,
 			App:        candidate.Spec.Name,
+			Container:  candidate.Spec.ContainerName,
 			Profile:    profileName,
 			SourceID:   candidate.Source.ID,
 		})
@@ -368,7 +368,7 @@ func restoreSnapshotKey(candidate restoreCandidate) string {
 
 func restoreCandidateWithSnapshot(ctx context.Context, runtime daemonRuntime, cfg config.Config, profileName string, selected restoreCandidate, snapshotID string, skipPreBackup bool, limiter *daemon.WriteLimiter) error {
 	profileCfg := cfg.Profiles[profileName]
-	return daemon.WithSourceLock(ctx, daemon.RepositoryLockKey(profileCfg, selected.Spec.Name), func() error {
+	return daemon.WithSourceLock(ctx, daemon.RepositoryLockKey(profileCfg), func() error {
 		return daemon.WithSourceLock(ctx, daemon.SourceLockKey(profileName, selected.Spec, selected.Source), func() error {
 			return limiter.With(ctx, daemon.BackendWriteKey(profileCfg), func() error {
 				stopped, err := stopMountedContainers(ctx, runtime, selected)
@@ -396,31 +396,41 @@ func loadConfigAndProfile(configPath, profileName string) (config.Config, string
 }
 
 func restoreWithStoppedContainers(ctx context.Context, runtime daemonRuntime, cfg config.Config, profileName, appName, sourceID, snapshotID string, skipPreBackup bool, selected restoreCandidate, stopped []string) error {
+	profileCfg := cfg.Profiles[profileName]
 	if !skipPreBackup {
-		profileCfg := cfg.Profiles[profileName]
 		if err := daemon.LoadExcludeFiles("/etc/volust/excludes", &selected.Spec); err != nil {
-			return restartContainers(ctx, runtime, stopped, err)
-		}
-		if _, err := daemon.RunSourceJobs(ctx, runtime, daemon.Options{JobImage: jobImage(), AssumeLocked: true, AssumeWriteSlot: true, SkipRetention: true}, profileCfg, selected.Spec, selected.Source, false); err != nil {
 			return restartContainers(ctx, runtime, stopped, err)
 		}
 	}
 
+	var commands []volustdocker.WorkerCommand
+	var mounts []volustdocker.JobMount
+	mounts = append(mounts,
+		volustdocker.BuildSourceMount(selected.Source, restic.SourcePath(selected.Spec, selected.Source), false),
+		volustdocker.BuildSourceMount(selected.Source, "/volust/target", false),
+		volustdocker.JobMount{Type: "volume", Target: "/volust/staging"},
+	)
+	if !skipPreBackup {
+		backup := restic.BackupCommand(profileCfg, selected.Spec, selected.Source, nil)
+		commands = append(commands, volustdocker.WorkerCommand{Operation: backup.Operation, Args: backup.Args, Env: backup.Env})
+	}
 	command := restic.RestoreCommand(cfg.Profiles[profileName], restic.RestoreRequest{
 		SnapshotID: snapshotID,
 		App:        appName,
+		Container:  selected.Spec.ContainerName,
 		Profile:    profileName,
 		SourceID:   sourceID,
 		TargetPath: "/volust/target",
 	})
-	job := volustdocker.BuildRestoreJob(volustdocker.JobRequest{
-		Name:   appName + "-" + sourceID,
-		Image:  jobImage(),
-		Source: selected.Source,
-		Args:   command.Args,
-		Env:    command.Env,
-	})
-	if err := runtime.RunJob(ctx, job); err != nil {
+	commands = append(commands, volustdocker.WorkerCommand{Operation: command.Operation, Args: command.Args, Env: command.Env})
+	worker := volustdocker.WorkerSpec{
+		Name:     volustdocker.WorkerName("restore", appName+"-"+sourceID),
+		Image:    workerImage(),
+		Env:      profileCfg.ResticEnv(),
+		Mounts:   mounts,
+		Commands: commands,
+	}
+	if err := runtime.RunWorker(ctx, worker); err != nil {
 		return restartContainers(ctx, runtime, stopped, err)
 	}
 	return restartContainers(ctx, runtime, stopped, nil)
@@ -470,7 +480,7 @@ func resolveSnapshot(ctx context.Context, runtime daemonRuntime, profile config.
 		}
 		return request.SnapshotID, nil
 	}
-	snapshot, ok := restic.LatestSnapshot(snapshots, request.App, request.Profile, request.SourceID)
+	snapshot, ok := restic.LatestSnapshot(snapshots, request.App, request.Container, request.Profile, request.SourceID)
 	if !ok || snapshot.SnapshotID() == "" {
 		return "", fmt.Errorf("no matching snapshot found for app=%s profile=%s source=%s", request.App, request.Profile, request.SourceID)
 	}
@@ -479,14 +489,17 @@ func resolveSnapshot(ctx context.Context, runtime daemonRuntime, profile config.
 
 func querySnapshots(ctx context.Context, runtime daemonRuntime, profile config.Profile, request restic.RestoreRequest) ([]restic.Snapshot, error) {
 	command := restic.SnapshotsCommand(profile, request)
-	job := volustdocker.JobSpec{
-		Name:      "volust-snapshots-" + strings.ReplaceAll(request.App+"-"+request.SourceID, "/", "-"),
-		Image:     jobImage(),
-		Operation: command.Operation,
-		Args:      command.Args,
-		Env:       command.Env,
+	worker := volustdocker.WorkerSpec{
+		Name:  volustdocker.WorkerName("snapshots", request.App+"-"+request.SourceID),
+		Image: workerImage(),
+		Env:   profile.ResticEnv(),
+		Commands: []volustdocker.WorkerCommand{{
+			Operation: command.Operation,
+			Args:      command.Args,
+			Env:       command.Env,
+		}},
 	}
-	output, err := runtime.RunJobOutput(ctx, job)
+	output, err := runtime.RunWorkerOutput(ctx, worker)
 	if err != nil {
 		return nil, err
 	}
@@ -696,11 +709,14 @@ func filterCandidates(candidates []restoreCandidate, keep func(restoreCandidate)
 	return filtered
 }
 
-func jobImage() string {
+func workerImage() string {
+	if image := os.Getenv("VOLUST_WORKER_IMAGE"); image != "" {
+		return image
+	}
 	if image := os.Getenv("VOLUST_JOB_IMAGE"); image != "" {
 		return image
 	}
-	return DefaultJobImage
+	return DefaultWorkerImage
 }
 
 func includeStoppedContainers() bool {

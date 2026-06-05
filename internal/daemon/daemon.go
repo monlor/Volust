@@ -21,13 +21,13 @@ import (
 
 type Runtime interface {
 	ListContainers(context.Context, volustdocker.ListOptions) ([]volustdocker.Container, error)
-	RunJob(context.Context, volustdocker.JobSpec) error
+	RunWorker(context.Context, volustdocker.WorkerSpec) error
 	StopContainer(context.Context, string) error
 	StartContainer(context.Context, string) error
 }
 
 type Options struct {
-	JobImage         string
+	WorkerImage      string
 	ConfigDir        string
 	ExcludeDir       string
 	LogWriter        io.Writer
@@ -48,8 +48,8 @@ type Report struct {
 }
 
 func RunOnce(ctx context.Context, cfg config.Config, runtime Runtime, options Options) (Report, error) {
-	if options.JobImage == "" {
-		options.JobImage = "volust:latest"
+	if options.WorkerImage == "" {
+		options.WorkerImage = "volust:latest"
 	}
 	if options.ExcludeDir == "" {
 		options.ExcludeDir = "/etc/volust/excludes"
@@ -61,8 +61,6 @@ func RunOnce(ctx context.Context, cfg config.Config, runtime Runtime, options Op
 	}
 
 	var report Report
-	pruneProfiles := map[string]config.Profile{}
-	pruneApps := map[string]map[string]struct{}{}
 	for _, container := range containers {
 		spec, err := volustdocker.ParseBackupSpecWithDefaults(container, cfg.Profiles, cfg.Defaults)
 		if err != nil {
@@ -74,46 +72,22 @@ func RunOnce(ctx context.Context, cfg config.Config, runtime Runtime, options Op
 		if err := LoadExcludeFiles(options.ExcludeDir, &spec); err != nil {
 			return report, err
 		}
-		profile := cfg.Profiles[spec.Profile]
-		pruneProfiles[spec.Profile] = profile
-		if pruneApps[spec.Profile] == nil {
-			pruneApps[spec.Profile] = map[string]struct{}{}
-		}
-		pruneApps[spec.Profile][spec.Name] = struct{}{}
 		for _, source := range spec.Sources {
 			logDiscovered(options.LogWriter, spec, source)
-			jobsStarted, err := RunSourceJobs(ctx, runtime, options, profile, spec, source, false)
-			if err != nil {
-				return report, err
-			}
-			report.JobsStarted += jobsStarted
 		}
-	}
-	profileNames := make([]string, 0, len(pruneProfiles))
-	for profileName := range pruneProfiles {
-		profileNames = append(profileNames, profileName)
-	}
-	sort.Strings(profileNames)
-	for _, profileName := range profileNames {
-		profile := pruneProfiles[profileName]
-		appNames := make([]string, 0, len(pruneApps[profileName]))
-		for appName := range pruneApps[profileName] {
-			appNames = append(appNames, appName)
+		profile := cfg.Profiles[spec.Profile]
+		jobsStarted, err := RunSpecJobs(ctx, runtime, options, profile, spec, spec.Sources, true)
+		if err != nil {
+			return report, err
 		}
-		sort.Strings(appNames)
-		for _, appName := range appNames {
-			if err := runPruneJob(ctx, runtime, options, profile, appName); err != nil {
-				return report, err
-			}
-			report.JobsStarted++
-		}
+		report.JobsStarted += jobsStarted
 	}
 	return report, nil
 }
 
 func RunScheduler(ctx context.Context, cfg config.Config, runtime Runtime, options Options) (Report, error) {
-	if options.JobImage == "" {
-		options.JobImage = "volust:latest"
+	if options.WorkerImage == "" {
+		options.WorkerImage = "volust:latest"
 	}
 	if options.ExcludeDir == "" {
 		options.ExcludeDir = "/etc/volust/excludes"
@@ -170,25 +144,23 @@ func reconcileSchedules(ctx context.Context, scheduler *cron.Cron, entries map[s
 			return report, err
 		}
 		report.Discovered++
-		profile := cfg.Profiles[spec.Profile]
-		for _, source := range spec.Sources {
-			key := scheduleKey(spec, source)
-			current[key] = struct{}{}
-			if _, ok := entries[key]; ok {
-				continue
-			}
-			logDiscovered(options.LogWriter, spec, source)
-			spec := spec
-			source := source
-			profile := profile
-			entryID, err := scheduler.AddFunc(spec.Schedule.Expr, func() {
-				runScheduledSourceJobs(ctx, runtime, options, profile, spec, source)
-			})
-			if err != nil {
-				return report, err
-			}
-			entries[key] = entryID
+		key := scheduleKey(spec)
+		current[key] = struct{}{}
+		if _, ok := entries[key]; ok {
+			continue
 		}
+		for _, source := range spec.Sources {
+			logDiscovered(options.LogWriter, spec, source)
+		}
+		scheduledSpec := spec
+		profile := cfg.Profiles[scheduledSpec.Profile]
+		entryID, err := scheduler.AddFunc(scheduledSpec.Schedule.Expr, func() {
+			runScheduledSpecJobs(ctx, runtime, options, profile, scheduledSpec)
+		})
+		if err != nil {
+			return report, err
+		}
+		entries[key] = entryID
 	}
 	for key, entryID := range entries {
 		if _, ok := current[key]; !ok {
@@ -200,34 +172,41 @@ func reconcileSchedules(ctx context.Context, scheduler *cron.Cron, entries map[s
 	return report, nil
 }
 
-func scheduleKey(spec volustdocker.BackupSpec, source volustdocker.Source) string {
-	return strings.Join([]string{spec.ContainerID, spec.Profile, spec.Name, source.ID, spec.Schedule.Expr}, "\x00")
+func scheduleKey(spec volustdocker.BackupSpec) string {
+	sourceIDs := make([]string, 0, len(spec.Sources))
+	for _, source := range spec.Sources {
+		sourceIDs = append(sourceIDs, source.ID)
+	}
+	sort.Strings(sourceIDs)
+	return strings.Join([]string{spec.ContainerID, spec.Profile, spec.Name, spec.Schedule.Expr, strings.Join(sourceIDs, ",")}, "\x00")
 }
 
-func runScheduledSourceJobs(ctx context.Context, runtime Runtime, options Options, profile config.Profile, spec volustdocker.BackupSpec, source volustdocker.Source) {
-	if _, err := RunSourceJobs(ctx, runtime, options, profile, spec, source, true); err != nil && options.LogWriter != nil {
-		fmt.Fprintf(options.LogWriter, "scheduled backup failed app=%s profile=%s source=%s: %v\n", spec.Name, spec.Profile, source.ID, err)
+func runScheduledSpecJobs(ctx context.Context, runtime Runtime, options Options, profile config.Profile, spec volustdocker.BackupSpec) {
+	if _, err := RunSpecJobs(ctx, runtime, options, profile, spec, spec.Sources, true); err != nil && options.LogWriter != nil {
+		fmt.Fprintf(options.LogWriter, "scheduled backup failed app=%s profile=%s: %v\n", spec.Name, spec.Profile, err)
 	}
 }
 
 func RunSourceJobs(ctx context.Context, runtime Runtime, options Options, profile config.Profile, spec volustdocker.BackupSpec, source volustdocker.Source, includePrune bool) (int, error) {
+	return RunSpecJobs(ctx, runtime, options, profile, spec, []volustdocker.Source{source}, includePrune)
+}
+
+func RunSpecJobs(ctx context.Context, runtime Runtime, options Options, profile config.Profile, spec volustdocker.BackupSpec, sources []volustdocker.Source, includePrune bool) (int, error) {
 	if !options.AssumeLocked {
 		var jobsStarted int
-		err := WithSourceLock(ctx, RepositoryLockKey(profile, spec.Name), func() error {
-			return WithSourceLock(ctx, SourceLockKey(spec.Profile, spec, source), func() error {
-				var err error
-				jobsStarted, err = runSourceJobsLocked(ctx, runtime, options, profile, spec, source, includePrune)
-				return err
-			})
+		err := WithSourceLock(ctx, RepositoryLockKey(profile), func() error {
+			var err error
+			jobsStarted, err = runSpecJobsLocked(ctx, runtime, options, profile, spec, sources, includePrune)
+			return err
 		})
 		return jobsStarted, err
 	}
-	return runSourceJobsLocked(ctx, runtime, options, profile, spec, source, includePrune)
+	return runSpecJobsLocked(ctx, runtime, options, profile, spec, sources, includePrune)
 }
 
-func runSourceJobsLocked(ctx context.Context, runtime Runtime, options Options, profile config.Profile, spec volustdocker.BackupSpec, source volustdocker.Source, includePrune bool) (int, error) {
-	if options.JobImage == "" {
-		options.JobImage = "volust:latest"
+func runSpecJobsLocked(ctx context.Context, runtime Runtime, options Options, profile config.Profile, spec volustdocker.BackupSpec, sources []volustdocker.Source, includePrune bool) (int, error) {
+	if options.WorkerImage == "" {
+		options.WorkerImage = "volust:latest"
 	}
 	if options.ExcludeDir == "" {
 		options.ExcludeDir = "/etc/volust/excludes"
@@ -237,42 +216,43 @@ func runSourceJobsLocked(ctx context.Context, runtime Runtime, options Options, 
 		excludeFiles = append(excludeFiles, filepath.Join(options.ExcludeDir, file))
 	}
 
-	commands := []restic.Command{
-		restic.BackupCommand(profile, spec, source, excludeFiles),
-	}
-	if !options.SkipRetention && len(spec.Retention.Args()) > 0 {
-		commands = append(commands, restic.ForgetCommand(profile, spec, source))
+	var commands []restic.Command
+	var mounts []volustdocker.JobMount
+	for _, source := range sources {
+		mounts = append(mounts, volustdocker.BuildSourceMount(source, restic.SourcePath(spec, source), true))
+		commands = append(commands, restic.BackupCommand(profile, spec, source, excludeFiles))
+		if !options.SkipRetention && len(spec.Retention.Args()) > 0 {
+			commands = append(commands, restic.ForgetCommand(profile, spec, source))
+		}
 	}
 	if includePrune {
-		commands = append(commands, restic.PruneCommand(profile, spec.Name))
+		commands = append(commands, restic.PruneCommand(profile))
 	}
-
-	jobsStarted := 0
+	workerCommands := make([]volustdocker.WorkerCommand, 0, len(commands))
 	for _, command := range commands {
-		jobName := fmt.Sprintf("%s-%s", spec.Name, source.ID)
-		job := volustdocker.BuildBackupJob(volustdocker.JobRequest{
-			Name:   jobName,
-			Image:  options.JobImage,
-			Source: source,
-			Args:   command.Args,
-			Env:    command.Env,
+		workerCommands = append(workerCommands, volustdocker.WorkerCommand{
+			Operation: command.Operation,
+			Args:      command.Args,
+			Env:       command.Env,
 		})
-		job.Operation = command.Operation
-		if command.Operation != "backup" {
-			job.Name = fmt.Sprintf("volust-%s-%s", command.Operation, jobName)
-		}
-		err := withWriteSlot(ctx, options, profile, func() error {
-			if command.Operation == "backup" && shouldStopBeforeBackup(options, spec) {
-				return runJobWithStoppedContainer(ctx, runtime, spec.ContainerID, job)
-			}
-			return runtime.RunJob(ctx, job)
-		})
-		if err != nil {
-			return jobsStarted, err
-		}
-		jobsStarted++
 	}
-	return jobsStarted, nil
+	worker := volustdocker.WorkerSpec{
+		Name:     volustdocker.WorkerName("backup", spec.Name),
+		Image:    options.WorkerImage,
+		Env:      profile.ResticEnv(),
+		Mounts:   mounts,
+		Commands: workerCommands,
+	}
+	err := withWriteSlot(ctx, options, profile, func() error {
+		if shouldStopBeforeBackup(options, spec) {
+			return runWorkerWithStoppedContainer(ctx, runtime, spec.ContainerID, worker)
+		}
+		return runtime.RunWorker(ctx, worker)
+	})
+	if err != nil {
+		return 0, err
+	}
+	return len(workerCommands), nil
 }
 
 func shouldStopBeforeBackup(options Options, spec volustdocker.BackupSpec) bool {
@@ -283,13 +263,13 @@ func shouldStopBeforeBackup(options Options, spec volustdocker.BackupSpec) bool 
 	return stop && spec.ContainerRunning && spec.ContainerID != ""
 }
 
-func runJobWithStoppedContainer(ctx context.Context, runtime Runtime, containerID string, job volustdocker.JobSpec) error {
+func runWorkerWithStoppedContainer(ctx context.Context, runtime Runtime, containerID string, worker volustdocker.WorkerSpec) error {
 	return WithSourceLock(ctx, ContainerLockKey(containerID), func() error {
 		if err := runtime.StopContainer(ctx, containerID); err != nil {
 			return err
 		}
-		jobErr := runtime.RunJob(ctx, job)
-		return restartBackupContainer(containerID, runtime, jobErr)
+		workerErr := runtime.RunWorker(ctx, worker)
+		return restartBackupContainer(containerID, runtime, workerErr)
 	})
 }
 
@@ -307,17 +287,23 @@ func restartBackupContainer(containerID string, runtime Runtime, err error) erro
 }
 
 func runPruneJob(ctx context.Context, runtime Runtime, options Options, profile config.Profile, name string) error {
-	command := restic.PruneCommand(profile, name)
-	job := volustdocker.JobSpec{
-		Name:      "volust-prune-" + strings.ReplaceAll(name, "/", "-"),
-		Image:     options.JobImage,
-		Operation: command.Operation,
-		Args:      command.Args,
-		Env:       command.Env,
+	if options.WorkerImage == "" {
+		options.WorkerImage = "volust:latest"
 	}
-	return WithSourceLock(ctx, RepositoryLockKey(profile, name), func() error {
+	command := restic.PruneCommand(profile)
+	worker := volustdocker.WorkerSpec{
+		Name:  volustdocker.WorkerName("prune", name),
+		Image: options.WorkerImage,
+		Env:   profile.ResticEnv(),
+		Commands: []volustdocker.WorkerCommand{{
+			Operation: command.Operation,
+			Args:      command.Args,
+			Env:       command.Env,
+		}},
+	}
+	return WithSourceLock(ctx, RepositoryLockKey(profile), func() error {
 		return withWriteSlot(ctx, options, profile, func() error {
-			return runtime.RunJob(ctx, job)
+			return runtime.RunWorker(ctx, worker)
 		})
 	})
 }

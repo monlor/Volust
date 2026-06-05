@@ -55,9 +55,6 @@ profiles:
 	if got := s3.RepositoryString(); got != "s3:s3.amazonaws.com/bucket/app" {
 		t.Fatalf("s3 repository = %q", got)
 	}
-	if got := s3.RepositoryStringForApp("postgres"); got != "s3:s3.amazonaws.com/bucket/app/postgres" {
-		t.Fatalf("s3 app repository = %q", got)
-	}
 	if got := s3.Password; got != "secret" {
 		t.Fatalf("password = %q", got)
 	}
@@ -68,9 +65,6 @@ profiles:
 	dav := cfg.Profiles["dav"]
 	if got := dav.RepositoryString(); got != "rclone:volust_dav:backups" {
 		t.Fatalf("webdav repository = %q", got)
-	}
-	if got := dav.RepositoryStringForApp("postgres"); got != "rclone:volust_dav:backups/postgres" {
-		t.Fatalf("webdav app repository = %q", got)
 	}
 	if got := dav.Env["RCLONE_CONFIG_VOLUST_DAV_TYPE"]; got != "webdav" {
 		t.Fatalf("rclone type env = %q", got)

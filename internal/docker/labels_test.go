@@ -6,8 +6,10 @@ import (
 	"github.com/monlor/volust/internal/config"
 )
 
+var testDefaults = config.PolicyDefaults{Schedule: "0 3 * * *"}
+
 func TestParseBackupSpecFromLabels(t *testing.T) {
-	spec, err := ParseBackupSpec(Container{
+	spec, err := ParseBackupSpecWithDefaults(Container{
 		ID:   "abc123",
 		Name: "/postgres",
 		Labels: map[string]string{
@@ -23,7 +25,7 @@ func TestParseBackupSpecFromLabels(t *testing.T) {
 			{Name: "pgdata", Destination: "/data", Type: "volume"},
 			{Source: "/srv/postgres/config", Destination: "/config", Type: "bind"},
 		},
-	}, map[string]config.Profile{"s3prod": {Type: config.ProfileS3}})
+	}, map[string]config.Profile{"s3prod": {Type: config.ProfileS3}}, testDefaults)
 	if err != nil {
 		t.Fatalf("ParseBackupSpec returned error: %v", err)
 	}
@@ -46,7 +48,7 @@ func TestParseBackupSpecFromLabels(t *testing.T) {
 }
 
 func TestParseBackupSpecRejectsMissingDeclaredSource(t *testing.T) {
-	_, err := ParseBackupSpec(Container{
+	_, err := ParseBackupSpecWithDefaults(Container{
 		Name: "/app",
 		Labels: map[string]string{
 			"volust.enabled":  "true",
@@ -55,14 +57,14 @@ func TestParseBackupSpecRejectsMissingDeclaredSource(t *testing.T) {
 			"volust.schedule": "0 3 * * *",
 		},
 		Mounts: []Mount{{Name: "data", Destination: "/data", Type: "volume"}},
-	}, map[string]config.Profile{"s3prod": {Type: config.ProfileS3}})
+	}, map[string]config.Profile{"s3prod": {Type: config.ProfileS3}}, testDefaults)
 	if err == nil {
 		t.Fatal("ParseBackupSpec succeeded for missing source mount")
 	}
 }
 
 func TestParseBackupSpecDefaultsProfileAndName(t *testing.T) {
-	spec, err := ParseBackupSpec(Container{
+	spec, err := ParseBackupSpecWithDefaults(Container{
 		Name: "/postgres",
 		Labels: map[string]string{
 			"volust.enabled":  "true",
@@ -70,7 +72,7 @@ func TestParseBackupSpecDefaultsProfileAndName(t *testing.T) {
 			"volust.schedule": "0 3 * * *",
 		},
 		Mounts: []Mount{{Name: "pgdata", Destination: "/data", Type: "volume"}},
-	}, map[string]config.Profile{"default": {Type: config.ProfileS3}})
+	}, map[string]config.Profile{"default": {Type: config.ProfileS3}}, testDefaults)
 	if err != nil {
 		t.Fatalf("ParseBackupSpec returned error: %v", err)
 	}
@@ -80,10 +82,13 @@ func TestParseBackupSpecDefaultsProfileAndName(t *testing.T) {
 	if spec.Name != "postgres" {
 		t.Fatalf("name = %q", spec.Name)
 	}
+	if spec.ContainerName != "postgres" {
+		t.Fatalf("container name = %q", spec.ContainerName)
+	}
 }
 
 func TestParseBackupSpecDefaultsSourcesFromBackupMounts(t *testing.T) {
-	spec, err := ParseBackupSpec(Container{
+	spec, err := ParseBackupSpecWithDefaults(Container{
 		Name: "/postgres",
 		Labels: map[string]string{
 			"volust.enabled":  "true",
@@ -96,7 +101,7 @@ func TestParseBackupSpecDefaultsSourcesFromBackupMounts(t *testing.T) {
 			{Type: "bind", Source: "/dev/kvm", Destination: "/dev/kvm"},
 			{Type: "tmpfs", Destination: "/tmp"},
 		},
-	}, map[string]config.Profile{"default": {Type: config.ProfileS3}})
+	}, map[string]config.Profile{"default": {Type: config.ProfileS3}}, testDefaults)
 	if err != nil {
 		t.Fatalf("ParseBackupSpec returned error: %v", err)
 	}
@@ -109,7 +114,7 @@ func TestParseBackupSpecDefaultsSourcesFromBackupMounts(t *testing.T) {
 }
 
 func TestParseBackupSpecDefaultsSkipAnonymousImageVolumes(t *testing.T) {
-	spec, err := ParseBackupSpec(Container{
+	spec, err := ParseBackupSpecWithDefaults(Container{
 		Name: "/postgres",
 		Labels: map[string]string{
 			"volust.enabled":  "true",
@@ -129,7 +134,7 @@ func TestParseBackupSpecDefaultsSkipAnonymousImageVolumes(t *testing.T) {
 				Destination: "/var/lib/postgresql/data",
 			},
 		},
-	}, map[string]config.Profile{"default": {Type: config.ProfileS3}})
+	}, map[string]config.Profile{"default": {Type: config.ProfileS3}}, testDefaults)
 	if err != nil {
 		t.Fatalf("ParseBackupSpec returned error: %v", err)
 	}
@@ -139,7 +144,7 @@ func TestParseBackupSpecDefaultsSkipAnonymousImageVolumes(t *testing.T) {
 }
 
 func TestParseBackupSpecDefaultsKeepNamedNestedVolumes(t *testing.T) {
-	spec, err := ParseBackupSpec(Container{
+	spec, err := ParseBackupSpecWithDefaults(Container{
 		Name: "/postgres",
 		Labels: map[string]string{
 			"volust.enabled":  "true",
@@ -149,7 +154,7 @@ func TestParseBackupSpecDefaultsKeepNamedNestedVolumes(t *testing.T) {
 			{Type: "volume", Name: "postgres-root", Destination: "/var/lib/postgresql"},
 			{Type: "volume", Name: "postgres-data", Destination: "/var/lib/postgresql/data"},
 		},
-	}, map[string]config.Profile{"default": {Type: config.ProfileS3}})
+	}, map[string]config.Profile{"default": {Type: config.ProfileS3}}, testDefaults)
 	if err != nil {
 		t.Fatalf("ParseBackupSpec returned error: %v", err)
 	}
@@ -184,7 +189,7 @@ func TestParseBackupSpecUsesDefaultScheduleAndRetention(t *testing.T) {
 	}
 }
 
-func TestParseBackupSpecLabelsOverrideDefaults(t *testing.T) {
+func TestParseBackupSpecRetentionLabelOverridesDefaultButScheduleDoesNot(t *testing.T) {
 	spec, err := ParseBackupSpecWithDefaults(Container{
 		Name: "/postgres",
 		Labels: map[string]string{
@@ -201,7 +206,7 @@ func TestParseBackupSpecLabelsOverrideDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseBackupSpec returned error: %v", err)
 	}
-	if got := spec.Schedule.Expr; got != "15 4 * * *" {
+	if got := spec.Schedule.Expr; got != "0 3 * * *" {
 		t.Fatalf("schedule = %q", got)
 	}
 	if got := spec.Retention.Args(); len(got) != 2 || got[1] != "3" {
@@ -210,7 +215,7 @@ func TestParseBackupSpecLabelsOverrideDefaults(t *testing.T) {
 }
 
 func TestParseBackupSpecParsesStopBeforeBackupLabel(t *testing.T) {
-	spec, err := ParseBackupSpec(Container{
+	spec, err := ParseBackupSpecWithDefaults(Container{
 		Name: "/postgres",
 		Labels: map[string]string{
 			"volust.enabled":            "true",
@@ -219,7 +224,7 @@ func TestParseBackupSpecParsesStopBeforeBackupLabel(t *testing.T) {
 			"volust.stop-before-backup": "yes",
 		},
 		Mounts: []Mount{{Type: "volume", Name: "pgdata", Destination: "/data"}},
-	}, map[string]config.Profile{"default": {Type: config.ProfileS3}})
+	}, map[string]config.Profile{"default": {Type: config.ProfileS3}}, testDefaults)
 	if err != nil {
 		t.Fatalf("ParseBackupSpec returned error: %v", err)
 	}
@@ -229,7 +234,7 @@ func TestParseBackupSpecParsesStopBeforeBackupLabel(t *testing.T) {
 }
 
 func TestParseBackupSpecRejectsUnknownProfile(t *testing.T) {
-	_, err := ParseBackupSpec(Container{
+	_, err := ParseBackupSpecWithDefaults(Container{
 		Name: "/app",
 		Labels: map[string]string{
 			"volust.enabled":  "true",
@@ -238,14 +243,14 @@ func TestParseBackupSpecRejectsUnknownProfile(t *testing.T) {
 			"volust.schedule": "0 3 * * *",
 		},
 		Mounts: []Mount{{Name: "data", Destination: "/data", Type: "volume"}},
-	}, map[string]config.Profile{"s3prod": {Type: config.ProfileS3}})
+	}, map[string]config.Profile{"s3prod": {Type: config.ProfileS3}}, testDefaults)
 	if err == nil {
 		t.Fatal("ParseBackupSpec succeeded for unknown profile")
 	}
 }
 
 func TestParseBackupSpecRejectsDuplicateSourceIDs(t *testing.T) {
-	_, err := ParseBackupSpec(Container{
+	_, err := ParseBackupSpecWithDefaults(Container{
 		Name: "/app",
 		Labels: map[string]string{
 			"volust.enabled":  "true",
@@ -256,7 +261,7 @@ func TestParseBackupSpecRejectsDuplicateSourceIDs(t *testing.T) {
 			{Name: "slash", Destination: "/a/b", Type: "volume"},
 			{Name: "dash", Destination: "/a-b", Type: "volume"},
 		},
-	}, map[string]config.Profile{"default": {Type: config.ProfileS3}})
+	}, map[string]config.Profile{"default": {Type: config.ProfileS3}}, testDefaults)
 	if err == nil {
 		t.Fatal("ParseBackupSpec succeeded for duplicate source IDs")
 	}

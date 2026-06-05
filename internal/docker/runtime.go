@@ -77,29 +77,31 @@ func (r *Runtime) StartContainer(ctx context.Context, id string) error {
 	return r.doJSON(ctx, http.MethodPost, r.host+"/containers/"+id+"/start", nil, nil)
 }
 
-func (r *Runtime) RunJob(ctx context.Context, job JobSpec) error {
-	_, err := r.runJob(ctx, job, false)
+func (r *Runtime) RunWorker(ctx context.Context, worker WorkerSpec) error {
+	_, err := r.runWorker(ctx, worker, false)
 	return err
 }
 
-func (r *Runtime) RunJobOutput(ctx context.Context, job JobSpec) ([]byte, error) {
-	return r.runJob(ctx, job, true)
+func (r *Runtime) RunWorkerOutput(ctx context.Context, worker WorkerSpec) ([]byte, error) {
+	return r.runWorker(ctx, worker, true)
 }
 
-func (r *Runtime) runJob(ctx context.Context, job JobSpec, captureOutput bool) ([]byte, error) {
-	entrypoint, cmd := entrypointAndCmd(job.Args)
+func (r *Runtime) runWorker(ctx context.Context, worker WorkerSpec, captureOutput bool) ([]byte, error) {
+	if len(worker.Commands) == 0 {
+		return nil, nil
+	}
 	payload := dockerCreateRequest{
-		Image:      job.Image,
-		Entrypoint: entrypoint,
-		Cmd:        cmd,
-		Env:        envList(job.Env),
+		Image:      worker.Image,
+		Entrypoint: []string{"sh"},
+		Cmd:        []string{"-ec", "trap 'exit 0' TERM INT; while :; do sleep 3600; done"},
+		Env:        envList(worker.Env),
 		HostConfig: dockerHostConfig{
 			AutoRemove: false,
-			Mounts:     dockerMounts(job.Mounts),
+			Mounts:     dockerMounts(worker.Mounts),
 		},
 	}
 	var created dockerCreateResponse
-	endpoint := r.host + "/containers/create?name=" + url.QueryEscape(uniqueJobName(job.Name))
+	endpoint := r.host + "/containers/create?name=" + url.QueryEscape(uniqueJobName(worker.Name))
 	if err := r.doJSON(ctx, http.MethodPost, endpoint, payload, &created); err != nil {
 		return nil, err
 	}
@@ -108,41 +110,81 @@ func (r *Runtime) runJob(ctx context.Context, job JobSpec, captureOutput bool) (
 		return nil, err
 	}
 
-	var wait dockerWaitResponse
-	if err := r.doJSON(ctx, http.MethodPost, r.host+"/containers/"+created.ID+"/wait", nil, &wait); err != nil {
+	var output []byte
+	for i, command := range worker.Commands {
+		stdout, err := r.execWorkerCommand(ctx, created.ID, worker, command)
+		if err != nil {
+			return nil, err
+		}
+		if captureOutput && i == len(worker.Commands)-1 {
+			output = stdout
+		}
+	}
+	return output, nil
+}
+
+func (r *Runtime) execWorkerCommand(ctx context.Context, containerID string, worker WorkerSpec, command WorkerCommand) ([]byte, error) {
+	var created dockerExecCreateResponse
+	payload := dockerExecCreateRequest{
+		AttachStdout: true,
+		AttachStderr: true,
+		Cmd:          append([]string{}, command.Args...),
+		Env:          envList(command.Env),
+	}
+	if err := r.doJSON(ctx, http.MethodPost, r.host+"/containers/"+containerID+"/exec", payload, &created); err != nil {
 		return nil, err
 	}
-	if wait.StatusCode != 0 {
-		logs, _ := r.raw(ctx, http.MethodGet, r.host+"/containers/"+created.ID+"/logs?stdout=1&stderr=1", nil)
-		return nil, fmt.Errorf("job %s exited with %d: %s", job.Name, wait.StatusCode, strings.TrimSpace(string(demuxDockerLogs(logs))))
-	}
-	if !captureOutput {
-		return nil, nil
-	}
-	logs, err := r.raw(ctx, http.MethodGet, r.host+"/containers/"+created.ID+"/logs?stdout=1&stderr=0", nil)
+	startPayload := dockerExecStartRequest{Detach: false, Tty: false}
+	data, err := r.rawJSON(ctx, http.MethodPost, r.host+"/exec/"+created.ID+"/start", startPayload)
 	if err != nil {
 		return nil, err
 	}
-	return demuxDockerLogs(logs), nil
+	stdout, _, combined := demuxDockerStream(data)
+
+	var inspected dockerExecInspectResponse
+	if err := r.doJSON(ctx, http.MethodGet, r.host+"/exec/"+created.ID+"/json", nil, &inspected); err != nil {
+		return nil, err
+	}
+	if inspected.ExitCode != 0 {
+		return nil, fmt.Errorf("worker %s command %s exited with %d: %s", worker.Name, command.Operation, inspected.ExitCode, strings.TrimSpace(string(combined)))
+	}
+	return stdout, nil
 }
 
 func demuxDockerLogs(input []byte) []byte {
-	var output []byte
+	stdout, stderr, _ := demuxDockerStream(input)
+	if len(stderr) == 0 {
+		return stdout
+	}
+	return append(stdout, stderr...)
+}
+
+func demuxDockerStream(input []byte) ([]byte, []byte, []byte) {
+	var stdout []byte
+	var stderr []byte
+	var combined []byte
+	original := input
+	parsed := false
 	for len(input) >= 8 && (input[0] == 1 || input[0] == 2) && input[1] == 0 && input[2] == 0 && input[3] == 0 {
+		stream := input[0]
 		size := int(input[4])<<24 | int(input[5])<<16 | int(input[6])<<8 | int(input[7])
 		if size < 0 || len(input) < 8+size {
-			return input
+			return original, nil, original
 		}
-		output = append(output, input[8:8+size]...)
+		chunk := input[8 : 8+size]
+		combined = append(combined, chunk...)
+		if stream == 1 {
+			stdout = append(stdout, chunk...)
+		} else {
+			stderr = append(stderr, chunk...)
+		}
 		input = input[8+size:]
+		parsed = true
 	}
-	if len(output) == 0 {
-		return input
+	if !parsed || len(input) != 0 {
+		return original, nil, original
 	}
-	if len(input) != 0 {
-		return append(output, input...)
-	}
-	return output
+	return stdout, stderr, combined
 }
 
 func uniqueJobName(base string) string {
@@ -171,6 +213,18 @@ func (r *Runtime) doJSON(ctx context.Context, method, endpoint string, body any,
 		return nil
 	}
 	return json.Unmarshal(respBody, output)
+}
+
+func (r *Runtime) rawJSON(ctx context.Context, method, endpoint string, body any) ([]byte, error) {
+	var reader io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		reader = bytes.NewReader(data)
+	}
+	return r.raw(ctx, method, endpoint, reader)
 }
 
 func (r *Runtime) raw(ctx context.Context, method, endpoint string, body io.Reader) ([]byte, error) {
@@ -293,4 +347,24 @@ type dockerCreateResponse struct {
 
 type dockerWaitResponse struct {
 	StatusCode int64 `json:"StatusCode"`
+}
+
+type dockerExecCreateRequest struct {
+	AttachStdout bool     `json:"AttachStdout"`
+	AttachStderr bool     `json:"AttachStderr"`
+	Cmd          []string `json:"Cmd"`
+	Env          []string `json:"Env,omitempty"`
+}
+
+type dockerExecStartRequest struct {
+	Detach bool `json:"Detach"`
+	Tty    bool `json:"Tty"`
+}
+
+type dockerExecCreateResponse struct {
+	ID string `json:"Id"`
+}
+
+type dockerExecInspectResponse struct {
+	ExitCode int `json:"ExitCode"`
 }

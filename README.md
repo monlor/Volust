@@ -2,7 +2,7 @@
 
 Volust is a Docker volume backup orchestrator written in Go.
 
-Applications opt in with `volust.*` labels. Volust reads labeled running containers through the Docker socket by default, resolves mounted backup sources, and starts one-shot restic job containers for backup, retention cleanup, pruning, and destructive restore. Stopped containers can be included with an explicit environment switch.
+Applications opt in with `volust.*` labels. Volust reads labeled running containers through the Docker socket by default, resolves mounted backup sources, and creates a temporary worker container for each backup or restore task. The main Volust service owns discovery, scheduling, locking, and command ordering; the worker only provides the dynamic source mounts for restic and rsync. Stopped containers can be included with an explicit environment switch.
 
 Repository: `github.com/monlor/volust`
 
@@ -39,7 +39,7 @@ docker run -d \
   ghcr.io/monlor/volust:latest
 ```
 
-The image starts `volust daemon` by default. You do not need to set `--entrypoint`, pass `daemon`, or run `restic init` yourself. Volust initializes each application repository automatically before the first backup.
+The image starts `volust daemon` by default. You do not need to set `--entrypoint`, pass `daemon`, or run `restic init` yourself. Volust initializes the configured node repository automatically before the first backup.
 
 This starts one default profile named `default`. Application containers can omit `volust.profile` unless they need a non-default profile.
 
@@ -141,7 +141,7 @@ Volust defaults to one profile named `default`.
 
 S3 variables:
 
-- `VOLUST_S3_REPOSITORY`: S3 storage root, for example `s3:s3.amazonaws.com/my-bucket/volust`; Volust appends an application directory such as `postgres`
+- `VOLUST_S3_REPOSITORY`: node-level restic repository, for example `s3:s3.amazonaws.com/my-bucket/volust/node-1`
 - `RESTIC_PASSWORD`: restic repository password
 - `AWS_ACCESS_KEY_ID`: S3 access key
 - `AWS_SECRET_ACCESS_KEY`: S3 secret key
@@ -150,7 +150,7 @@ S3 variables:
 WebDAV variables:
 
 - `VOLUST_PROFILE_TYPE=webdav`
-- `VOLUST_WEBDAV_PATH`: storage root path inside the WebDAV remote; Volust appends an application directory such as `postgres`
+- `VOLUST_WEBDAV_PATH`: node-level restic repository path inside the WebDAV remote
 - `VOLUST_WEBDAV_URL`: WebDAV endpoint
 - `VOLUST_WEBDAV_USER`: WebDAV username
 - `VOLUST_WEBDAV_PASS`: WebDAV password
@@ -160,17 +160,20 @@ WebDAV variables:
 Shared variables:
 
 - `VOLUST_PROFILE`: optional profile name, defaults to `default`
-- `VOLUST_DEFAULT_SCHEDULE`: default five-field cron schedule for labeled containers that omit `volust.schedule`
+- `VOLUST_DEFAULT_SCHEDULE`: five-field cron schedule owned by the Volust service
 - `VOLUST_DEFAULT_RETENTION`: default retention policy for labeled containers that omit `volust.retention`
-- `VOLUST_JOB_IMAGE`: optional image for one-shot job containers, defaults to `ghcr.io/monlor/volust:latest`
+- `VOLUST_WORKER_IMAGE`: optional image for temporary worker containers, defaults to `ghcr.io/monlor/volust:latest`
+- `VOLUST_JOB_IMAGE`: compatibility alias for `VOLUST_WORKER_IMAGE` when `VOLUST_WORKER_IMAGE` is unset
 - `VOLUST_INCLUDE_STOPPED_CONTAINERS`: include stopped labeled containers in backup/restore discovery when set to `true`, `1`, `yes`, or `on`; defaults to `false`
 - `VOLUST_STOP_CONTAINERS_BEFORE_BACKUP`: stop running application containers while their backup job runs when set to `true`, `1`, `yes`, or `on`; defaults to `false`
 - `VOLUST_MAX_CONCURRENT_WRITES`: maximum concurrent restic write jobs per storage backend on the same Volust host/container, defaults to `4`; set to `0` to disable the backend write limit. Backup, forget, prune, and restore consume write slots. Snapshot listing stays read-only and does not consume a slot.
 - `VOLUST_LOCK_TIMEOUT`: local lock and restic `--retry-lock` wait timeout, defaults to `6h`
 
-Volust creates one restic repository per application. `VOLUST_S3_REPOSITORY=s3:s3.amazonaws.com/my-bucket/volust` and `volust.name=postgres` produce `s3:s3.amazonaws.com/my-bucket/volust/postgres`. `VOLUST_WEBDAV_PATH=volust` and `volust.name=postgres` produce `rclone:<remote>:volust/postgres`. Safe application names stay readable; names with path separators or unsafe characters are slugged and receive a short hash. Changing `volust.name` changes the application repository identity and creates a new repository. There is no node-level repository compatibility fallback or automatic migration for old backups.
+Volust now uses one restic repository per node/profile. Application and source identity live in snapshot paths and tags, not in repository subdirectories. A source is backed up at `/volust/sources/<container-name>/<source-id>` and tagged with `volust`, `app:<app-name>`, `container:<container-name>`, `profile:<profile>`, and `source:<source-id>`.
 
-Jobs that use the same application repository are queued and run one at a time, while different application repositories can run concurrently up to `VOLUST_MAX_CONCURRENT_WRITES` per backend. WebDAV backends are grouped by normalized `VOLUST_WEBDAV_URL`; S3 backends are grouped by endpoint and bucket. Different backends do not consume each other's write slots. Manual commands started with `docker exec volust volust backup` or `docker exec volust volust restore` share the same local backend write slots with daemon jobs. The backend write limit does not remove stale restic locks; clear stale backend locks with `restic unlock` after confirming no backup is running.
+This repository layout is not compatible with older per-application Volust backups. There is no automatic migration or fallback lookup for old snapshots.
+
+Tasks that use the same node repository are queued and run one at a time, while different repositories can run concurrently up to `VOLUST_MAX_CONCURRENT_WRITES` per backend. WebDAV backends are grouped by normalized `VOLUST_WEBDAV_URL`; S3 backends are grouped by endpoint and bucket. Different backends do not consume each other's write slots. Manual commands started with `docker exec volust volust backup` or `docker exec volust volust restore` share the same local locks and backend write slots with daemon tasks. The backend write limit does not remove stale restic locks; clear stale backend locks with `restic unlock` after confirming no backup is running.
 
 The compose files keep all variables inline so deployment is a single file. Edit the placeholder values before starting.
 
@@ -182,18 +185,17 @@ The compose files keep all variables inline so deployment is a single file. Edit
 
 Optional labels:
 
-- `volust.name=<app-name>` defaults to the Docker container name and is used as the application repository identity
+- `volust.name=<app-name>` defaults to the Docker container name and is used as the application identity in snapshot tags
 - `volust.profile=<profile-name>` defaults to `default`
 - `volust.sources=/data,/config` defaults to all regular bind and volume mounts, excluding socket and device/system mounts
-- `volust.schedule=0 3 * * *` defaults to `VOLUST_DEFAULT_SCHEDULE`
 - `volust.retention=keep-last=7,keep-daily=7,keep-weekly=4,keep-monthly=6` defaults to `VOLUST_DEFAULT_RETENTION`
 - `volust.stop-before-backup=true|false` overrides `VOLUST_STOP_CONTAINERS_BEFORE_BACKUP` for that application
 
-`volust.enabled=true` only opts a container into discovery. Backup frequency is controlled by `volust.schedule`; if that label is omitted, Volust uses `VOLUST_DEFAULT_SCHEDULE` from the Volust service environment. Stopping a container during backup is disabled by default; enable it globally with `VOLUST_STOP_CONTAINERS_BEFORE_BACKUP=true`, or override individual applications with `volust.stop-before-backup`. When enabled, Volust stops the running application container before its backup job starts and automatically starts it again after the backup job exits, including when the backup job fails. Restart cleanup uses a hard 2 minute timeout; if backup and restart both fail, both errors are returned or logged by the command/scheduler and the container may require manual intervention. The stop call uses the active command or scheduler context. The application is unavailable for the full stop, backup job, and restart window, so use this mode only when that downtime is acceptable or after putting the application into maintenance mode. The daemon refreshes discovered containers every minute and schedules each source with its cron expression. Jobs that use the same application repository are queued and run one at a time, while different application repositories can run concurrently within the per-backend write limit. Use `docker exec volust volust backup --app <app-name>` for an immediate application backup outside the schedule, or `docker exec volust volust daemon --once` to scan and back up all discovered applications once.
+`volust.enabled=true` only opts a container into discovery. Backup frequency is controlled by `VOLUST_DEFAULT_SCHEDULE` or config defaults on the Volust service; `volust.schedule` labels are ignored. Stopping a container during backup is disabled by default; enable it globally with `VOLUST_STOP_CONTAINERS_BEFORE_BACKUP=true`, or override individual applications with `volust.stop-before-backup`. When enabled, Volust stops the running application container before its worker starts and automatically starts it again after the worker exits, including when a worker command fails. Restart cleanup uses a hard 2 minute timeout; if backup and restart both fail, both errors are returned or logged by the command/scheduler and the container may require manual intervention. The stop call uses the active command or scheduler context. The application is unavailable for the full stop, worker, and restart window, so use this mode only when that downtime is acceptable or after putting the application into maintenance mode. The daemon refreshes discovered containers every minute and schedules each application with the service-level cron expression. Use `docker exec volust volust backup --app <app-name>` for an immediate application backup outside the schedule, or `docker exec volust volust daemon --once` to scan and back up all discovered applications once.
 
-When provided, sources must exactly match mounted paths inside the application container. Volust maps each source into a job container at `/volust/sources/<source-id>`.
+When provided, sources must exactly match mounted paths inside the application container. Volust maps each source into a worker container at `/volust/sources/<container-name>/<source-id>`.
 
-Exclude files are read by the Volust daemon from `/etc/volust/excludes`. Mount that directory into the Volust container when using `volust.exclude-file`; the one-shot backup job does not need a separate mount.
+Exclude files are read by the Volust daemon from `/etc/volust/excludes`. Mount that directory into the Volust container when using `volust.exclude-file`; the worker does not need a separate exclude-file mount.
 
 ## Local Development Build
 

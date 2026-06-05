@@ -18,6 +18,7 @@ type Command struct {
 type RestoreRequest struct {
 	SnapshotID string
 	App        string
+	Container  string
 	Profile    string
 	SourceID   string
 	TargetPath string
@@ -31,8 +32,8 @@ type Snapshot struct {
 }
 
 func BackupCommand(profile config.Profile, spec docker.BackupSpec, source docker.Source, excludeFiles []string) Command {
-	backupArgs := baseArgs(profile, spec.Name, "backup")
-	backupArgs = append(backupArgs, "/volust/sources/"+source.ID)
+	backupArgs := baseArgs(profile, "backup")
+	backupArgs = append(backupArgs, SourcePath(spec, source))
 	backupArgs = append(backupArgs, tagArgs(spec, source.ID)...)
 	for _, exclude := range spec.Excludes {
 		backupArgs = append(backupArgs, "--exclude", exclude)
@@ -40,27 +41,27 @@ func BackupCommand(profile config.Profile, spec docker.BackupSpec, source docker
 	for _, excludeFile := range excludeFiles {
 		backupArgs = append(backupArgs, "--exclude-file", excludeFile)
 	}
-	configArgs := baseArgs(profile, spec.Name, "cat")
+	configArgs := baseArgs(profile, "cat")
 	configArgs = append(configArgs, "config")
-	initArgs := baseArgs(profile, spec.Name, "init")
+	initArgs := baseArgs(profile, "init")
 	script := shellJoin(configArgs) + " >/dev/null 2>&1 || " + shellJoin(initArgs) + " && " + shellJoin(backupArgs)
 	return Command{Operation: "backup", Args: []string{"sh", "-ec", script}, Env: profile.ResticEnv()}
 }
 
 func ForgetCommand(profile config.Profile, spec docker.BackupSpec, source docker.Source) Command {
-	args := baseArgs(profile, spec.Name, "forget")
+	args := baseArgs(profile, "forget")
 	args = append(args, tagArgs(spec, source.ID)...)
 	args = append(args, spec.Retention.Args()...)
 	return Command{Operation: "forget", Args: args, Env: profile.ResticEnv()}
 }
 
-func PruneCommand(profile config.Profile, appName string) Command {
-	return Command{Operation: "prune", Args: baseArgs(profile, appName, "prune"), Env: profile.ResticEnv()}
+func PruneCommand(profile config.Profile) Command {
+	return Command{Operation: "prune", Args: baseArgs(profile, "prune"), Env: profile.ResticEnv()}
 }
 
 func RestoreCommand(profile config.Profile, request RestoreRequest) Command {
 	staging := "/volust/staging/restore"
-	include := "/volust/sources/" + request.SourceID
+	include := RequestSourcePath(request)
 	steps := []string{
 		shellJoin([]string{"rm", "-rf", staging}),
 		shellJoin([]string{"mkdir", "-p", staging, request.TargetPath}),
@@ -77,17 +78,20 @@ func RestoreCommand(profile config.Profile, request RestoreRequest) Command {
 }
 
 func SnapshotsCommand(profile config.Profile, request RestoreRequest) Command {
-	include := "/volust/sources/" + request.SourceID
+	include := RequestSourcePath(request)
 	args := snapshotValidationArgs(profile, request, include)
 	return Command{Operation: "snapshots", Args: args, Env: profile.ResticEnv()}
 }
 
-func LatestSnapshot(snapshots []Snapshot, app, profile, source string) (Snapshot, bool) {
+func LatestSnapshot(snapshots []Snapshot, app, container, profile, source string) (Snapshot, bool) {
 	required := map[string]bool{
 		"volust":             false,
 		"app:" + app:         false,
 		"profile:" + profile: false,
 		"source:" + source:   false,
+	}
+	if container != "" {
+		required["container:"+container] = false
 	}
 
 	var matches []Snapshot
@@ -123,12 +127,29 @@ func (s Snapshot) SnapshotID() string {
 	return s.ID
 }
 
-func baseArgs(profile config.Profile, appName, operation string) []string {
-	return []string{"restic", "-r", profile.RepositoryStringForApp(appName), "--retry-lock", lockTimeout(), operation}
+func SourcePath(spec docker.BackupSpec, source docker.Source) string {
+	return "/volust/sources/" + cleanPathPart(spec.ContainerName) + "/" + source.ID
+}
+
+func RequestSourcePath(request RestoreRequest) string {
+	return "/volust/sources/" + cleanPathPart(request.Container) + "/" + request.SourceID
+}
+
+func baseArgs(profile config.Profile, operation string) []string {
+	return []string{"restic", "-r", profile.RepositoryString(), "--retry-lock", lockTimeout(), operation}
+}
+
+func cleanPathPart(value string) string {
+	value = strings.Trim(strings.TrimSpace(value), "/")
+	value = strings.ReplaceAll(value, "/", "-")
+	if value == "" {
+		return "container"
+	}
+	return value
 }
 
 func tagArgs(spec docker.BackupSpec, sourceID string) []string {
-	tags := []string{"volust", "app:" + spec.Name, "profile:" + spec.Profile, "source:" + sourceID}
+	tags := []string{"volust", "app:" + spec.Name, "container:" + spec.ContainerName, "profile:" + spec.Profile, "source:" + sourceID}
 	args := make([]string, 0, len(tags)*2)
 	for _, tag := range tags {
 		args = append(args, "--tag", tag)
@@ -137,11 +158,14 @@ func tagArgs(spec docker.BackupSpec, sourceID string) []string {
 }
 
 func restoreArgs(profile config.Profile, request RestoreRequest, staging, include string) []string {
-	args := []string{"restic", "-r", profile.RepositoryStringForApp(request.App), "restore", request.SnapshotID, "--target", staging, "--include", include}
+	args := []string{"restic", "-r", profile.RepositoryString(), "restore", request.SnapshotID, "--target", staging, "--include", include}
 	args = withRetryLock(args)
 	args = append(args, "--path", include)
 	if request.App != "" {
 		args = append(args, "--tag", "volust", "--tag", "app:"+request.App)
+	}
+	if request.Container != "" {
+		args = append(args, "--tag", "container:"+request.Container)
 	}
 	if request.Profile != "" {
 		args = append(args, "--tag", "profile:"+request.Profile)
@@ -153,7 +177,7 @@ func restoreArgs(profile config.Profile, request RestoreRequest, staging, includ
 }
 
 func snapshotValidationArgs(profile config.Profile, request RestoreRequest, include string) []string {
-	args := []string{"restic", "-r", profile.RepositoryStringForApp(request.App), "snapshots"}
+	args := []string{"restic", "-r", profile.RepositoryString(), "snapshots"}
 	if request.SnapshotID != "" {
 		args = append(args, request.SnapshotID)
 	}
@@ -161,6 +185,9 @@ func snapshotValidationArgs(profile config.Profile, request RestoreRequest, incl
 	args = withRetryLock(args)
 	if request.App != "" {
 		args = append(args, "--tag", "volust", "--tag", "app:"+request.App)
+	}
+	if request.Container != "" {
+		args = append(args, "--tag", "container:"+request.Container)
 	}
 	if request.Profile != "" {
 		args = append(args, "--tag", "profile:"+request.Profile)

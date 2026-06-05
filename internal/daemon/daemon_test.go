@@ -32,18 +32,18 @@ func TestRunOnceCreatesBackupForgetAndPruneJobsPerSource(t *testing.T) {
 			Mounts: []volustdocker.Mount{{Type: "volume", Name: "pgdata", Destination: "/data"}},
 		}},
 	}
-	cfg := config.Config{Profiles: map[string]config.Profile{
+	cfg := config.Config{Defaults: config.PolicyDefaults{Schedule: "0 3 * * *"}, Profiles: map[string]config.Profile{
 		"s3prod": {Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app", Password: "secret"},
 	}}
 
-	report, err := RunOnce(context.Background(), cfg, runtime, Options{JobImage: "volust:latest"})
+	report, err := RunOnce(context.Background(), cfg, runtime, Options{WorkerImage: "volust:latest"})
 	if err != nil {
 		t.Fatalf("RunOnce returned error: %v", err)
 	}
 	if report.Discovered != 1 || report.JobsStarted != 3 {
 		t.Fatalf("report = %#v", report)
 	}
-	if got := runtime.jobs[0].Name; got != "volust-backup-postgres-data" {
+	if got := runtime.jobs[0].Name; got != "volust-backup-postgres" {
 		t.Fatalf("first job name = %q", got)
 	}
 	if got := runtime.jobs[1].Operation; got != "forget" {
@@ -72,14 +72,14 @@ func TestRunOnceStopsRunningContainerWhenGlobalStopBeforeBackupEnabled(t *testin
 			Mounts: []volustdocker.Mount{{Type: "volume", Name: "pgdata", Destination: "/data"}},
 		}},
 	}
-	cfg := config.Config{Profiles: map[string]config.Profile{
+	cfg := config.Config{Defaults: config.PolicyDefaults{Schedule: "0 3 * * *"}, Profiles: map[string]config.Profile{
 		"s3prod": {Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app", Password: "secret"},
 	}}
 
-	if _, err := RunOnce(context.Background(), cfg, runtime, Options{JobImage: "volust:latest", StopBeforeBackup: true}); err != nil {
+	if _, err := RunOnce(context.Background(), cfg, runtime, Options{WorkerImage: "volust:latest", StopBeforeBackup: true}); err != nil {
 		t.Fatalf("RunOnce returned error: %v", err)
 	}
-	want := []string{"stop:abc", "job:backup", "start:abc", "job:prune"}
+	want := []string{"stop:abc", "job:backup", "job:prune", "start:abc"}
 	if !equalStrings(runtime.events, want) {
 		t.Fatalf("events = %#v, want %#v", runtime.events, want)
 	}
@@ -101,11 +101,11 @@ func TestRunOnceStopBeforeBackupLabelOverridesGlobalDefault(t *testing.T) {
 			Mounts: []volustdocker.Mount{{Type: "volume", Name: "pgdata", Destination: "/data"}},
 		}},
 	}
-	cfg := config.Config{Profiles: map[string]config.Profile{
+	cfg := config.Config{Defaults: config.PolicyDefaults{Schedule: "0 3 * * *"}, Profiles: map[string]config.Profile{
 		"s3prod": {Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app", Password: "secret"},
 	}}
 
-	if _, err := RunOnce(context.Background(), cfg, runtime, Options{JobImage: "volust:latest", StopBeforeBackup: true}); err != nil {
+	if _, err := RunOnce(context.Background(), cfg, runtime, Options{WorkerImage: "volust:latest", StopBeforeBackup: true}); err != nil {
 		t.Fatalf("RunOnce returned error: %v", err)
 	}
 	want := []string{"job:backup", "job:prune"}
@@ -128,11 +128,11 @@ func TestRunOnceSkipsForgetWhenRetentionIsUnset(t *testing.T) {
 			Mounts: []volustdocker.Mount{{Type: "volume", Name: "pgdata", Destination: "/data"}},
 		}},
 	}
-	cfg := config.Config{Profiles: map[string]config.Profile{
+	cfg := config.Config{Defaults: config.PolicyDefaults{Schedule: "0 3 * * *"}, Profiles: map[string]config.Profile{
 		"s3prod": {Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app", Password: "secret"},
 	}}
 
-	report, err := RunOnce(context.Background(), cfg, runtime, Options{JobImage: "volust:latest"})
+	report, err := RunOnce(context.Background(), cfg, runtime, Options{WorkerImage: "volust:latest"})
 	if err != nil {
 		t.Fatalf("RunOnce returned error: %v", err)
 	}
@@ -172,25 +172,25 @@ func TestRunOnceUsesDefaultPolicyAndSources(t *testing.T) {
 		},
 	}
 
-	report, err := RunOnce(context.Background(), cfg, runtime, Options{JobImage: "volust:latest"})
+	report, err := RunOnce(context.Background(), cfg, runtime, Options{WorkerImage: "volust:latest"})
 	if err != nil {
 		t.Fatalf("RunOnce returned error: %v", err)
 	}
 	if report.Discovered != 1 || report.JobsStarted != 3 {
 		t.Fatalf("report = %#v", report)
 	}
-	if got := runtime.jobs[0].Name; got != "volust-backup-postgres-data" {
+	if got := runtime.jobs[0].Name; got != "volust-backup-postgres" {
 		t.Fatalf("first job name = %q", got)
 	}
 }
 
 func TestRunOncePassesIncludeStoppedOptionToRuntime(t *testing.T) {
 	runtime := &fakeRuntime{}
-	cfg := config.Config{Profiles: map[string]config.Profile{
+	cfg := config.Config{Defaults: config.PolicyDefaults{Schedule: "0 3 * * *"}, Profiles: map[string]config.Profile{
 		"default": {Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app", Password: "secret"},
 	}}
 
-	if _, err := RunOnce(context.Background(), cfg, runtime, Options{JobImage: "volust:latest", IncludeStopped: true}); err != nil {
+	if _, err := RunOnce(context.Background(), cfg, runtime, Options{WorkerImage: "volust:latest", IncludeStopped: true}); err != nil {
 		t.Fatalf("RunOnce returned error: %v", err)
 	}
 	if !runtime.lastListOptions.IncludeStopped {
@@ -215,11 +215,11 @@ func TestRunOncePrunesOncePerProfile(t *testing.T) {
 			},
 		}},
 	}
-	cfg := config.Config{Profiles: map[string]config.Profile{
+	cfg := config.Config{Defaults: config.PolicyDefaults{Schedule: "0 3 * * *"}, Profiles: map[string]config.Profile{
 		"s3prod": {Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app", Password: "secret"},
 	}}
 
-	if _, err := RunOnce(context.Background(), cfg, runtime, Options{JobImage: "volust:latest"}); err != nil {
+	if _, err := RunOnce(context.Background(), cfg, runtime, Options{WorkerImage: "volust:latest"}); err != nil {
 		t.Fatalf("RunOnce returned error: %v", err)
 	}
 	prunes := 0
@@ -244,13 +244,13 @@ func TestRunPruneJobSerializesSameAppRepository(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		if err := runPruneJob(context.Background(), runtime, Options{JobImage: "volust:latest"}, profile, "postgres"); err != nil {
+		if err := runPruneJob(context.Background(), runtime, Options{WorkerImage: "volust:latest"}, profile, "postgres"); err != nil {
 			t.Errorf("runPruneJob A returned error: %v", err)
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		if err := runPruneJob(context.Background(), runtime, Options{JobImage: "volust:latest"}, profile, "postgres"); err != nil {
+		if err := runPruneJob(context.Background(), runtime, Options{WorkerImage: "volust:latest"}, profile, "postgres"); err != nil {
 			t.Errorf("runPruneJob B returned error: %v", err)
 		}
 	}()
@@ -267,7 +267,7 @@ func TestRunPruneJobSerializesSameAppRepository(t *testing.T) {
 	}
 }
 
-func TestRunPruneJobAllowsDifferentAppRepositories(t *testing.T) {
+func TestRunPruneJobSerializesSameNodeRepositoryAcrossApps(t *testing.T) {
 	runtime := &lockingRuntime{release: make(chan struct{})}
 	profile := config.Profile{Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app", Password: "secret"}
 
@@ -275,31 +275,31 @@ func TestRunPruneJobAllowsDifferentAppRepositories(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		if err := runPruneJob(context.Background(), runtime, Options{JobImage: "volust:latest"}, profile, "postgres"); err != nil {
+		if err := runPruneJob(context.Background(), runtime, Options{WorkerImage: "volust:latest"}, profile, "postgres"); err != nil {
 			t.Errorf("runPruneJob A returned error: %v", err)
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		if err := runPruneJob(context.Background(), runtime, Options{JobImage: "volust:latest"}, profile, "redis"); err != nil {
+		if err := runPruneJob(context.Background(), runtime, Options{WorkerImage: "volust:latest"}, profile, "redis"); err != nil {
 			t.Errorf("runPruneJob B returned error: %v", err)
 		}
 	}()
-	deadline := time.After(time.Second)
-	for atomic.LoadInt32(&runtime.started) < 2 {
-		select {
-		case <-deadline:
-			close(runtime.release)
-			wg.Wait()
-			t.Fatalf("different app prune jobs did not start concurrently, started=%d maxRunning=%d", atomic.LoadInt32(&runtime.started), atomic.LoadInt32(&runtime.maxRunning))
-		default:
-			time.Sleep(time.Millisecond)
-		}
+	for atomic.LoadInt32(&runtime.started) == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	if got := atomic.LoadInt32(&runtime.maxRunning); got != 1 {
+		close(runtime.release)
+		wg.Wait()
+		t.Fatalf("prune jobs overlapped before release, maxRunning=%d", got)
 	}
 	close(runtime.release)
 	wg.Wait()
-	if got := atomic.LoadInt32(&runtime.maxRunning); got != 2 {
-		t.Fatalf("different app prune jobs did not overlap, maxRunning=%d", got)
+	if got := atomic.LoadInt32(&runtime.started); got != 2 {
+		t.Fatalf("started = %d", got)
+	}
+	if got := atomic.LoadInt32(&runtime.maxRunning); got != 1 {
+		t.Fatalf("same node repository prune jobs overlapped, maxRunning=%d", got)
 	}
 }
 
@@ -319,20 +319,20 @@ func TestRunSchedulerLogsSourceJobFailures(t *testing.T) {
 		}},
 		runErr: errors.New("restic failed"),
 	}
-	cfg := config.Config{Profiles: map[string]config.Profile{
+	cfg := config.Config{Defaults: config.PolicyDefaults{Schedule: "0 3 * * *"}, Profiles: map[string]config.Profile{
 		"s3prod": {Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app", Password: "secret"},
 	}}
 	var log bytes.Buffer
-	spec, err := volustdocker.ParseBackupSpec(runtime.containers[0], cfg.Profiles)
+	spec, err := volustdocker.ParseBackupSpecWithDefaults(runtime.containers[0], cfg.Profiles, config.PolicyDefaults{Schedule: "0 3 * * *"})
 	if err != nil {
 		t.Fatalf("ParseBackupSpec returned error: %v", err)
 	}
 	profile := cfg.Profiles[spec.Profile]
-	runScheduledSourceJobs(context.Background(), runtime, Options{JobImage: "volust:latest", LogWriter: &log}, profile, spec, spec.Sources[0])
+	runScheduledSpecJobs(context.Background(), runtime, Options{WorkerImage: "volust:latest", LogWriter: &log}, profile, spec)
 	if !strings.Contains(log.String(), "restic failed") {
 		t.Fatalf("scheduler did not log job failure, log=%q", log.String())
 	}
-	if got := log.String(); !strings.Contains(got, "postgres") || !strings.Contains(got, "data") {
+	if got := log.String(); !strings.Contains(got, "postgres") {
 		t.Fatalf("scheduler log lacks job context: %q", got)
 	}
 }
@@ -356,11 +356,11 @@ func TestRunOnceLoadsExcludeFilesIntoBackupCommand(t *testing.T) {
 			Mounts: []volustdocker.Mount{{Type: "volume", Name: "pgdata", Destination: "/data"}},
 		}},
 	}
-	cfg := config.Config{Profiles: map[string]config.Profile{
+	cfg := config.Config{Defaults: config.PolicyDefaults{Schedule: "0 3 * * *"}, Profiles: map[string]config.Profile{
 		"s3prod": {Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app", Password: "secret"},
 	}}
 
-	if _, err := RunOnce(context.Background(), cfg, runtime, Options{JobImage: "volust:latest", ExcludeDir: dir}); err != nil {
+	if _, err := RunOnce(context.Background(), cfg, runtime, Options{WorkerImage: "volust:latest", ExcludeDir: dir}); err != nil {
 		t.Fatalf("RunOnce returned error: %v", err)
 	}
 	script := runtime.jobs[0].Args[2]
@@ -382,12 +382,12 @@ func TestRunOnceLogsSkippedContainerReasons(t *testing.T) {
 			Labels: map[string]string{"volust.enabled": "true"},
 		}},
 	}
-	cfg := config.Config{Profiles: map[string]config.Profile{
+	cfg := config.Config{Defaults: config.PolicyDefaults{Schedule: "0 3 * * *"}, Profiles: map[string]config.Profile{
 		"default": {Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app", Password: "secret"},
 	}}
 	var log bytes.Buffer
 
-	report, err := RunOnce(context.Background(), cfg, runtime, Options{JobImage: "volust:latest", LogWriter: &log})
+	report, err := RunOnce(context.Background(), cfg, runtime, Options{WorkerImage: "volust:latest", LogWriter: &log})
 	if err != nil {
 		t.Fatalf("RunOnce returned error: %v", err)
 	}
@@ -413,12 +413,12 @@ func TestRunOnceLogsDiscoveredBackupApplications(t *testing.T) {
 			Mounts: []volustdocker.Mount{{Type: "volume", Name: "pgdata", Destination: "/data"}},
 		}},
 	}
-	cfg := config.Config{Profiles: map[string]config.Profile{
+	cfg := config.Config{Defaults: config.PolicyDefaults{Schedule: "0 3 * * *"}, Profiles: map[string]config.Profile{
 		"s3prod": {Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app", Password: "secret"},
 	}}
 	var log bytes.Buffer
 
-	if _, err := RunOnce(context.Background(), cfg, runtime, Options{JobImage: "volust:latest", LogWriter: &log}); err != nil {
+	if _, err := RunOnce(context.Background(), cfg, runtime, Options{WorkerImage: "volust:latest", LogWriter: &log}); err != nil {
 		t.Fatalf("RunOnce returned error: %v", err)
 	}
 	got := log.String()
@@ -452,12 +452,12 @@ func TestRunSchedulerRescansForNewContainers(t *testing.T) {
 			}
 		},
 	}
-	cfg := config.Config{Profiles: map[string]config.Profile{
+	cfg := config.Config{Defaults: config.PolicyDefaults{Schedule: "0 3 * * *"}, Profiles: map[string]config.Profile{
 		"s3prod": {Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app", Password: "secret"},
 	}}
 	var log bytes.Buffer
 
-	report, err := RunScheduler(ctx, cfg, runtime, Options{JobImage: "volust:latest", RefreshInterval: time.Millisecond, LogWriter: &log})
+	report, err := RunScheduler(ctx, cfg, runtime, Options{WorkerImage: "volust:latest", RefreshInterval: time.Millisecond, LogWriter: &log})
 	if err != context.Canceled {
 		t.Fatalf("RunScheduler error = %v", err)
 	}
@@ -474,7 +474,7 @@ func TestRunSchedulerRescansForNewContainers(t *testing.T) {
 
 func TestRunSourceJobsSerializesSameSource(t *testing.T) {
 	runtime := &lockingRuntime{release: make(chan struct{})}
-	spec, err := volustdocker.ParseBackupSpec(volustdocker.Container{
+	spec, err := volustdocker.ParseBackupSpecWithDefaults(volustdocker.Container{
 		ID:   "abc",
 		Name: "/postgres",
 		Labels: map[string]string{
@@ -484,7 +484,7 @@ func TestRunSourceJobsSerializesSameSource(t *testing.T) {
 			"volust.schedule": "0 3 * * *",
 		},
 		Mounts: []volustdocker.Mount{{Type: "volume", Name: "pgdata", Destination: "/data"}},
-	}, map[string]config.Profile{"s3prod": {Type: config.ProfileS3}})
+	}, map[string]config.Profile{"s3prod": {Type: config.ProfileS3}}, config.PolicyDefaults{Schedule: "0 3 * * *"})
 	if err != nil {
 		t.Fatalf("ParseBackupSpec returned error: %v", err)
 	}
@@ -495,7 +495,7 @@ func TestRunSourceJobsSerializesSameSource(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := RunSourceJobs(context.Background(), runtime, Options{JobImage: "volust:latest"}, profile, spec, spec.Sources[0], false); err != nil {
+			if _, err := RunSourceJobs(context.Background(), runtime, Options{WorkerImage: "volust:latest"}, profile, spec, spec.Sources[0], false); err != nil {
 				t.Errorf("RunSourceJobs returned error: %v", err)
 			}
 		}()
@@ -539,13 +539,13 @@ func TestRunSourceJobsSerializesSamePhysicalVolumeAcrossApps(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		if _, err := RunSourceJobs(context.Background(), runtime, Options{JobImage: "volust:latest"}, profile, specA, specA.Sources[0], false); err != nil {
+		if _, err := RunSourceJobs(context.Background(), runtime, Options{WorkerImage: "volust:latest"}, profile, specA, specA.Sources[0], false); err != nil {
 			t.Errorf("RunSourceJobs A returned error: %v", err)
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		if _, err := RunSourceJobs(context.Background(), runtime, Options{JobImage: "volust:latest"}, profile, specB, specB.Sources[0], false); err != nil {
+		if _, err := RunSourceJobs(context.Background(), runtime, Options{WorkerImage: "volust:latest"}, profile, specB, specB.Sources[0], false); err != nil {
 			t.Errorf("RunSourceJobs B returned error: %v", err)
 		}
 	}()
@@ -588,13 +588,13 @@ func TestRunSourceJobsSerializesSameAppRepositoryAcrossSources(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		if _, err := RunSourceJobs(context.Background(), runtime, Options{JobImage: "volust:latest"}, profile, specA, specA.Sources[0], false); err != nil {
+		if _, err := RunSourceJobs(context.Background(), runtime, Options{WorkerImage: "volust:latest"}, profile, specA, specA.Sources[0], false); err != nil {
 			t.Errorf("RunSourceJobs A returned error: %v", err)
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		if _, err := RunSourceJobs(context.Background(), runtime, Options{JobImage: "volust:latest"}, profile, specB, specB.Sources[0], false); err != nil {
+		if _, err := RunSourceJobs(context.Background(), runtime, Options{WorkerImage: "volust:latest"}, profile, specB, specB.Sources[0], false); err != nil {
 			t.Errorf("RunSourceJobs B returned error: %v", err)
 		}
 	}()
@@ -611,7 +611,7 @@ func TestRunSourceJobsSerializesSameAppRepositoryAcrossSources(t *testing.T) {
 	}
 }
 
-func TestRunSourceJobsAllowsDifferentAppRepositoriesToRunConcurrently(t *testing.T) {
+func TestRunSourceJobsSerializesSameNodeRepositoryAcrossApps(t *testing.T) {
 	runtime := &lockingRuntime{release: make(chan struct{})}
 	profileA := config.Profile{Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app", Password: "secret"}
 	profileB := config.Profile{Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app", Password: "secret"}
@@ -638,31 +638,31 @@ func TestRunSourceJobsAllowsDifferentAppRepositoriesToRunConcurrently(t *testing
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		if _, err := RunSourceJobs(context.Background(), runtime, Options{JobImage: "volust:latest"}, profileA, specA, specA.Sources[0], false); err != nil {
+		if _, err := RunSourceJobs(context.Background(), runtime, Options{WorkerImage: "volust:latest"}, profileA, specA, specA.Sources[0], false); err != nil {
 			t.Errorf("RunSourceJobs A returned error: %v", err)
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		if _, err := RunSourceJobs(context.Background(), runtime, Options{JobImage: "volust:latest"}, profileB, specB, specB.Sources[0], false); err != nil {
+		if _, err := RunSourceJobs(context.Background(), runtime, Options{WorkerImage: "volust:latest"}, profileB, specB, specB.Sources[0], false); err != nil {
 			t.Errorf("RunSourceJobs B returned error: %v", err)
 		}
 	}()
-	deadline := time.After(time.Second)
-	for atomic.LoadInt32(&runtime.started) < 2 {
-		select {
-		case <-deadline:
-			close(runtime.release)
-			wg.Wait()
-			t.Fatalf("second app repository job did not start concurrently, started=%d maxRunning=%d", atomic.LoadInt32(&runtime.started), atomic.LoadInt32(&runtime.maxRunning))
-		default:
-			time.Sleep(time.Millisecond)
-		}
+	for atomic.LoadInt32(&runtime.started) == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	if got := atomic.LoadInt32(&runtime.maxRunning); got != 1 {
+		close(runtime.release)
+		wg.Wait()
+		t.Fatalf("jobs overlapped before release, maxRunning=%d", got)
 	}
 	close(runtime.release)
 	wg.Wait()
-	if got := atomic.LoadInt32(&runtime.maxRunning); got != 2 {
-		t.Fatalf("different app repository jobs did not overlap, maxRunning=%d", got)
+	if got := atomic.LoadInt32(&runtime.started); got != 2 {
+		t.Fatalf("started = %d", got)
+	}
+	if got := atomic.LoadInt32(&runtime.maxRunning); got != 1 {
+		t.Fatalf("same node repository jobs overlapped, maxRunning=%d", got)
 	}
 }
 
@@ -686,7 +686,7 @@ func TestRunSourceJobsLimitsWritesPerBackend(t *testing.T) {
 		i := i
 		go func() {
 			defer wg.Done()
-			if _, err := RunSourceJobs(context.Background(), runtime, Options{JobImage: "volust:latest", WriteLimiter: limiter}, profiles[i], specs[i], specs[i].Sources[0], false); err != nil {
+			if _, err := RunSourceJobs(context.Background(), runtime, Options{WorkerImage: "volust:latest", WriteLimiter: limiter}, profiles[i], specs[i], specs[i].Sources[0], false); err != nil {
 				t.Errorf("RunSourceJobs %d returned error: %v", i, err)
 			}
 		}()
@@ -731,13 +731,13 @@ func TestRunSourceJobsAllowsDifferentBackendsToRunConcurrently(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		if _, err := RunSourceJobs(context.Background(), runtime, Options{JobImage: "volust:latest", WriteLimiter: limiter}, profileA, specA, specA.Sources[0], false); err != nil {
+		if _, err := RunSourceJobs(context.Background(), runtime, Options{WorkerImage: "volust:latest", WriteLimiter: limiter}, profileA, specA, specA.Sources[0], false); err != nil {
 			t.Errorf("RunSourceJobs A returned error: %v", err)
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		if _, err := RunSourceJobs(context.Background(), runtime, Options{JobImage: "volust:latest", WriteLimiter: limiter}, profileB, specB, specB.Sources[0], false); err != nil {
+		if _, err := RunSourceJobs(context.Background(), runtime, Options{WorkerImage: "volust:latest", WriteLimiter: limiter}, profileB, specB, specB.Sources[0], false); err != nil {
 			t.Errorf("RunSourceJobs B returned error: %v", err)
 		}
 	}()
@@ -924,13 +924,13 @@ func TestRunSourceJobsStillSerializesSameAppRepositoryBeforeBackendWriteLimit(t 
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		if _, err := RunSourceJobs(context.Background(), runtime, Options{JobImage: "volust:latest", WriteLimiter: limiter}, profile, specA, specA.Sources[0], false); err != nil {
+		if _, err := RunSourceJobs(context.Background(), runtime, Options{WorkerImage: "volust:latest", WriteLimiter: limiter}, profile, specA, specA.Sources[0], false); err != nil {
 			t.Errorf("RunSourceJobs A returned error: %v", err)
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		if _, err := RunSourceJobs(context.Background(), runtime, Options{JobImage: "volust:latest", WriteLimiter: limiter}, profile, specB, specB.Sources[0], false); err != nil {
+		if _, err := RunSourceJobs(context.Background(), runtime, Options{WorkerImage: "volust:latest", WriteLimiter: limiter}, profile, specB, specB.Sources[0], false); err != nil {
 			t.Errorf("RunSourceJobs B returned error: %v", err)
 		}
 	}()
@@ -978,17 +978,17 @@ profiles:
 		t.Fatalf("Load returned error: %v", err)
 	}
 
-	keyA := RepositoryLockKey(cfg.Profiles["dav-a"], "postgres")
-	keyB := RepositoryLockKey(cfg.Profiles["dav-b"], "postgres")
-	keyC := RepositoryLockKey(cfg.Profiles["dav-c"], "postgres")
+	keyA := RepositoryLockKey(cfg.Profiles["dav-a"])
+	keyB := RepositoryLockKey(cfg.Profiles["dav-b"])
+	keyC := RepositoryLockKey(cfg.Profiles["dav-c"])
 	if keyA != keyB {
-		t.Fatalf("same WebDAV app repository should share repository lock: %q != %q", keyA, keyB)
+		t.Fatalf("same WebDAV node repository should share repository lock: %q != %q", keyA, keyB)
 	}
 	if keyA == keyC {
-		t.Fatalf("different WebDAV app repositories should not share repository lock: %q", keyA)
+		t.Fatalf("different WebDAV node repositories should not share repository lock: %q", keyA)
 	}
-	if keyA == RepositoryLockKey(cfg.Profiles["dav-a"], "redis") {
-		t.Fatalf("different apps should not share repository lock: %q", keyA)
+	if keyA != RepositoryLockKey(cfg.Profiles["dav-a"]) {
+		t.Fatalf("same node repository should have a stable repository lock: %q", keyA)
 	}
 }
 
@@ -1027,7 +1027,7 @@ func TestRunSourceJobsSerializesStopBeforeBackupByContainer(t *testing.T) {
 		source := source
 		go func() {
 			defer wg.Done()
-			_, err := RunSourceJobs(context.Background(), runtime, Options{JobImage: "volust:latest", StopBeforeBackup: true}, profile, spec, source, false)
+			_, err := RunSourceJobs(context.Background(), runtime, Options{WorkerImage: "volust:latest", StopBeforeBackup: true}, profile, spec, source, false)
 			errs <- err
 		}()
 	}
@@ -1066,7 +1066,7 @@ func TestRunSourceJobsAcquiresGlobalWriteSlotBeforeStoppingContainer(t *testing.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if _, err := RunSourceJobs(context.Background(), runtime, Options{JobImage: "volust:latest", WriteLimiter: limiter}, profileA, specA, specA.Sources[0], false); err != nil {
+		if _, err := RunSourceJobs(context.Background(), runtime, Options{WorkerImage: "volust:latest", WriteLimiter: limiter}, profileA, specA, specA.Sources[0], false); err != nil {
 			t.Errorf("RunSourceJobs A returned error: %v", err)
 		}
 	}()
@@ -1076,7 +1076,7 @@ func TestRunSourceJobsAcquiresGlobalWriteSlotBeforeStoppingContainer(t *testing.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if _, err := RunSourceJobs(context.Background(), runtime, Options{JobImage: "volust:latest", WriteLimiter: limiter, StopBeforeBackup: true}, profileB, specB, specB.Sources[0], false); err != nil {
+		if _, err := RunSourceJobs(context.Background(), runtime, Options{WorkerImage: "volust:latest", WriteLimiter: limiter, StopBeforeBackup: true}, profileB, specB, specB.Sources[0], false); err != nil {
 			t.Errorf("RunSourceJobs B returned error: %v", err)
 		}
 	}()
@@ -1103,7 +1103,7 @@ func (f *lockingRuntime) ListContainers(_ context.Context, _ volustdocker.ListOp
 	return nil, nil
 }
 
-func (f *lockingRuntime) RunJob(_ context.Context, _ volustdocker.JobSpec) error {
+func (f *lockingRuntime) RunWorker(_ context.Context, _ volustdocker.WorkerSpec) error {
 	running := atomic.AddInt32(&f.running, 1)
 	for {
 		maxRunning := atomic.LoadInt32(&f.maxRunning)
@@ -1138,7 +1138,7 @@ func (f *containerStopRuntime) ListContainers(_ context.Context, _ volustdocker.
 	return nil, nil
 }
 
-func (f *containerStopRuntime) RunJob(_ context.Context, _ volustdocker.JobSpec) error {
+func (f *containerStopRuntime) RunWorker(_ context.Context, _ volustdocker.WorkerSpec) error {
 	atomic.AddInt32(&f.started, 1)
 	if f.release != nil {
 		<-f.release
@@ -1164,12 +1164,19 @@ func (f *containerStopRuntime) StartContainer(context.Context, string) error {
 type fakeRuntime struct {
 	containers      []volustdocker.Container
 	containerSets   [][]volustdocker.Container
-	jobs            []volustdocker.JobSpec
+	jobs            []fakeJob
 	events          []string
 	runErr          error
 	listCalls       int
 	onList          func(int)
 	lastListOptions volustdocker.ListOptions
+}
+
+type fakeJob struct {
+	Name      string
+	Operation string
+	Args      []string
+	Mounts    []volustdocker.JobMount
 }
 
 func (f *fakeRuntime) ListContainers(_ context.Context, options volustdocker.ListOptions) ([]volustdocker.Container, error) {
@@ -1188,10 +1195,15 @@ func (f *fakeRuntime) ListContainers(_ context.Context, options volustdocker.Lis
 	return f.containers, nil
 }
 
-func (f *fakeRuntime) RunJob(_ context.Context, job volustdocker.JobSpec) error {
-	f.jobs = append(f.jobs, job)
-	f.events = append(f.events, "job:"+job.Operation)
-	return f.runErr
+func (f *fakeRuntime) RunWorker(_ context.Context, worker volustdocker.WorkerSpec) error {
+	for _, command := range worker.Commands {
+		f.jobs = append(f.jobs, fakeJob{Name: worker.Name, Operation: command.Operation, Args: command.Args, Mounts: worker.Mounts})
+		f.events = append(f.events, "job:"+command.Operation)
+		if f.runErr != nil {
+			return f.runErr
+		}
+	}
+	return nil
 }
 
 func (f *fakeRuntime) StopContainer(_ context.Context, id string) error {

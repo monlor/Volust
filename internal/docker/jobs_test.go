@@ -1,57 +1,33 @@
 package docker
 
-import (
-	"testing"
-)
+import "testing"
 
-func TestBuildBackupJobMountsSourceReadOnly(t *testing.T) {
-	job := BuildBackupJob(JobRequest{
-		Name:  "postgres-data",
-		Image: "volust:latest",
-		Source: Source{
-			ID:         "data",
-			Type:       "volume",
-			VolumeName: "pgdata",
-		},
-		Args: []string{"restic", "backup"},
-	})
+func TestBuildSourceMountForVolume(t *testing.T) {
+	mount := BuildSourceMount(Source{
+		ID:         "data",
+		Type:       "volume",
+		VolumeName: "pgdata",
+	}, "/volust/sources/postgres-1/data", true)
 
-	if job.Name != "volust-backup-postgres-data" {
-		t.Fatalf("name = %q", job.Name)
-	}
-	if len(job.Mounts) != 1 {
-		t.Fatalf("mount count = %d", len(job.Mounts))
-	}
-	mount := job.Mounts[0]
-	if mount.Source != "pgdata" || mount.Target != "/volust/sources/data" || !mount.ReadOnly {
+	if mount.Type != "volume" || mount.Source != "pgdata" || mount.Target != "/volust/sources/postgres-1/data" || !mount.ReadOnly {
 		t.Fatalf("mount = %#v", mount)
 	}
 }
 
-func TestBuildRestoreJobMountsTargetWritableAndStagingOutsideOverlay(t *testing.T) {
-	job := BuildRestoreJob(JobRequest{
-		Name:  "postgres-config",
-		Image: "volust:latest",
-		Source: Source{
-			ID:         "config",
-			Type:       "bind",
-			HostSource: "/srv/postgres/config",
-		},
-		Args: []string{"sh", "-ec", "restore"},
-	})
+func TestBuildSourceMountForBind(t *testing.T) {
+	mount := BuildSourceMount(Source{
+		ID:         "config",
+		Type:       "bind",
+		HostSource: "/srv/postgres/config",
+	}, "/volust/target", false)
 
-	if job.Name != "volust-restore-postgres-config" {
-		t.Fatalf("name = %q", job.Name)
-	}
-	if len(job.Mounts) != 2 {
-		t.Fatalf("mount count = %d", len(job.Mounts))
-	}
-	mount := job.Mounts[0]
-	if mount.Source != "/srv/postgres/config" || mount.Target != "/volust/target" || mount.ReadOnly {
+	if mount.Type != "bind" || mount.Source != "/srv/postgres/config" || mount.Target != "/volust/target" || mount.ReadOnly {
 		t.Fatalf("mount = %#v", mount)
 	}
-	staging := job.Mounts[1]
-	if staging.Type != "volume" || staging.Source != "" || staging.Target != "/volust/staging" || staging.ReadOnly {
-		t.Fatalf("staging mount = %#v", staging)
+}
+
+func TestWorkerNameSlugsInput(t *testing.T) {
+	if got := WorkerName("backup", "Team/Postgres Data"); got != "volust-backup-team-postgres-data" {
+		t.Fatalf("worker name = %q", got)
 	}
 }

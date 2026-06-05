@@ -2,21 +2,18 @@ package docker
 
 import "strings"
 
-type JobRequest struct {
-	Name   string
-	Image  string
-	Source Source
-	Args   []string
-	Env    map[string]string
+type WorkerSpec struct {
+	Name     string
+	Image    string
+	Env      map[string]string
+	Mounts   []JobMount
+	Commands []WorkerCommand
 }
 
-type JobSpec struct {
-	Name      string
-	Image     string
+type WorkerCommand struct {
 	Operation string
 	Args      []string
 	Env       map[string]string
-	Mounts    []JobMount
 }
 
 type JobMount struct {
@@ -26,40 +23,13 @@ type JobMount struct {
 	ReadOnly bool
 }
 
-func BuildBackupJob(request JobRequest) JobSpec {
-	return buildJob("volust-backup-"+slug(request.Name), "backup", request, "/volust/sources/"+request.Source.ID, true)
-}
-
-func BuildRestoreJob(request JobRequest) JobSpec {
-	job := buildJob("volust-restore-"+slug(request.Name), "restore", request, "/volust/target", false)
-	job.Mounts = append(job.Mounts, JobMount{
-		Type:   "volume",
-		Target: "/volust/staging",
-	})
-	return job
-}
-
-func buildJob(name, operation string, request JobRequest, target string, readOnly bool) JobSpec {
-	return JobSpec{
-		Name:      name,
-		Image:     request.Image,
-		Operation: operation,
-		Args:      append([]string{}, request.Args...),
-		Env:       copyEnv(request.Env),
-		Mounts: []JobMount{{
-			Type:     request.Source.Type,
-			Source:   mountSource(request.Source),
-			Target:   target,
-			ReadOnly: readOnly,
-		}},
+func BuildSourceMount(source Source, target string, readOnly bool) JobMount {
+	return JobMount{
+		Type:     source.Type,
+		Source:   mountSource(source),
+		Target:   target,
+		ReadOnly: readOnly,
 	}
-}
-
-func mountSource(source Source) string {
-	if source.Type == "volume" {
-		return source.VolumeName
-	}
-	return source.HostSource
 }
 
 func copyEnv(input map[string]string) map[string]string {
@@ -76,7 +46,18 @@ func slug(input string) string {
 	input = replacer.Replace(input)
 	input = strings.Trim(input, "-")
 	if input == "" {
-		return "job"
+		return "worker"
 	}
 	return input
+}
+
+func WorkerName(prefix, name string) string {
+	return "volust-" + prefix + "-" + slug(name)
+}
+
+func mountSource(source Source) string {
+	if source.Type == "volume" {
+		return source.VolumeName
+	}
+	return source.HostSource
 }

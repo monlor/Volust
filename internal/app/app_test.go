@@ -169,8 +169,9 @@ func TestRunRestoreStartsWritableRestoreJobAfterConfirmation(t *testing.T) {
 	if job.Image != "ghcr.io/monlor/volust:test" {
 		t.Fatalf("job image = %q", job.Image)
 	}
-	if job.Mounts[0].Target != "/volust/target" || job.Mounts[0].ReadOnly {
-		t.Fatalf("restore mount = %#v", job.Mounts[0])
+	targetMount := findMount(job.Mounts, "/volust/target")
+	if targetMount == nil || targetMount.ReadOnly {
+		t.Fatalf("restore mount = %#v", job.Mounts)
 	}
 	if script := job.Args[2]; !strings.Contains(script, "--tag app:postgres") || !strings.Contains(script, "--tag profile:s3prod") || !strings.Contains(script, "--tag source:data") {
 		t.Fatalf("restore command does not filter latest snapshot by tags: %q", script)
@@ -460,6 +461,7 @@ func TestRestartContainersUsesCleanupContextAfterCancellation(t *testing.T) {
 func TestRunRestorePromptsForMissingAppAndSource(t *testing.T) {
 	t.Setenv("VOLUST_S3_REPOSITORY", "s3:s3.amazonaws.com/bucket/app")
 	t.Setenv("RESTIC_PASSWORD", "secret")
+	t.Setenv("VOLUST_DEFAULT_SCHEDULE", "0 3 * * *")
 	fake := &appFakeRuntime{
 		containers: []volustdocker.Container{{
 			ID:   "abc",
@@ -533,8 +535,8 @@ func TestRunRestoreAllVolumesInteractivelyRestoresNamedVolumes(t *testing.T) {
 			},
 		},
 		snapshotOutput: `[
-			{"short_id":"pg-snap","id":"pg-snap","time":"2026-01-02T00:00:00Z","tags":["volust","app:postgres","profile:s3prod","source:data"]},
-			{"short_id":"redis-snap","id":"redis-snap","time":"2026-01-02T00:00:00Z","tags":["volust","app:redis","profile:s3prod","source:data"]}
+			{"short_id":"pg-snap","id":"pg-snap","time":"2026-01-02T00:00:00Z","tags":["volust","app:postgres","container:postgres","profile:s3prod","source:data"]},
+			{"short_id":"redis-snap","id":"redis-snap","time":"2026-01-02T00:00:00Z","tags":["volust","app:redis","container:redis","profile:s3prod","source:data"]}
 		]`,
 	}
 	oldRuntime := newRuntime
@@ -732,7 +734,7 @@ func TestRunSnapshotsPromptsForAppAndSource(t *testing.T) {
 				{Type: "volume", Name: "pgconfig", Destination: "/config"},
 			},
 		}},
-		snapshotOutput: `[{"short_id":"snap-new","id":"snap-new","time":"2026-01-02T00:00:00Z","tags":["volust","app:postgres","profile:s3prod","source:config"]},{"short_id":"snap-old","id":"snap-old","time":"2026-01-01T00:00:00Z","tags":["volust","app:postgres","profile:s3prod","source:config"]}]`,
+		snapshotOutput: `[{"short_id":"snap-new","id":"snap-new","time":"2026-01-02T00:00:00Z","tags":["volust","app:postgres","container:postgres","profile:s3prod","source:config"]},{"short_id":"snap-old","id":"snap-old","time":"2026-01-01T00:00:00Z","tags":["volust","app:postgres","container:postgres","profile:s3prod","source:config"]}]`,
 	}
 	oldRuntime := newRuntime
 	newRuntime = func() (daemonRuntime, error) {
@@ -775,7 +777,7 @@ func TestRunSnapshotsUsesParameters(t *testing.T) {
 			},
 			Mounts: []volustdocker.Mount{{Type: "volume", Name: "pgdata", Destination: "/data"}},
 		}},
-		snapshotOutput: `[{"short_id":"snap-1","id":"snap-1","time":"2026-01-01T00:00:00Z","tags":["volust","app:postgres","profile:s3prod","source:data"]}]`,
+		snapshotOutput: `[{"short_id":"snap-1","id":"snap-1","time":"2026-01-01T00:00:00Z","tags":["volust","app:postgres","container:postgres","profile:s3prod","source:data"]}]`,
 	}
 	oldRuntime := newRuntime
 	newRuntime = func() (daemonRuntime, error) {
@@ -902,7 +904,7 @@ func TestRunBackupUsesStopBeforeBackupEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run returned error: %v\noutput: %s", err, out.String())
 	}
-	if !equalStrings(fake.events, []string{"stop:abc", "job:backup", "start:abc", "job:prune"}) {
+	if !equalStrings(fake.events, []string{"stop:abc", "job:backup", "job:prune", "start:abc"}) {
 		t.Fatalf("events = %#v", fake.events)
 	}
 }
@@ -945,7 +947,7 @@ func TestRunBackupPromptsForMissingAppAndSupportsSourceParameter(t *testing.T) {
 	if !equalStrings(fake.events, []string{"job:backup", "job:forget", "job:prune"}) {
 		t.Fatalf("events = %#v", fake.events)
 	}
-	if len(fake.jobs) == 0 || !strings.Contains(fake.jobs[0].Args[2], "/volust/sources/config") {
+	if len(fake.jobs) == 0 || !strings.Contains(fake.jobs[0].Args[2], "/volust/sources/postgres/config") {
 		t.Fatalf("backup job = %#v", fake.jobs)
 	}
 }
@@ -954,7 +956,7 @@ func writeConfig(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
-	body := []byte("profiles:\n  s3prod:\n    type: s3\n    repository: s3:s3.amazonaws.com/bucket/app\n    password: test\n")
+	body := []byte("defaults:\n  schedule: \"0 3 * * *\"\nprofiles:\n  s3prod:\n    type: s3\n    repository: s3:s3.amazonaws.com/bucket/app\n    password: test\n")
 	if err := os.WriteFile(path, body, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -963,13 +965,30 @@ func writeConfig(t *testing.T) string {
 
 type appFakeRuntime struct {
 	containers              []volustdocker.Container
-	jobs                    []volustdocker.JobSpec
+	jobs                    []appFakeJob
 	events                  []string
 	lastListOptions         volustdocker.ListOptions
 	sawIncludeStopped       bool
 	sawCanceledStartContext bool
 	runJobErrByOperation    map[string]error
 	snapshotOutput          string
+}
+
+type appFakeJob struct {
+	Name      string
+	Image     string
+	Operation string
+	Args      []string
+	Mounts    []volustdocker.JobMount
+}
+
+func findMount(mounts []volustdocker.JobMount, target string) *volustdocker.JobMount {
+	for i := range mounts {
+		if mounts[i].Target == target {
+			return &mounts[i]
+		}
+	}
+	return nil
 }
 
 func (f *appFakeRuntime) ListContainers(_ context.Context, options volustdocker.ListOptions) ([]volustdocker.Container, error) {
@@ -980,16 +999,20 @@ func (f *appFakeRuntime) ListContainers(_ context.Context, options volustdocker.
 	return f.containers, nil
 }
 
-func (f *appFakeRuntime) RunJob(_ context.Context, job volustdocker.JobSpec) error {
-	f.jobs = append(f.jobs, job)
-	f.events = append(f.events, "job:"+job.Operation)
-	if f.runJobErrByOperation != nil {
-		return f.runJobErrByOperation[job.Operation]
+func (f *appFakeRuntime) RunWorker(_ context.Context, worker volustdocker.WorkerSpec) error {
+	for _, command := range worker.Commands {
+		f.jobs = append(f.jobs, appFakeJob{Name: worker.Name, Image: worker.Image, Operation: command.Operation, Args: command.Args, Mounts: worker.Mounts})
+		f.events = append(f.events, "job:"+command.Operation)
+		if f.runJobErrByOperation != nil {
+			return f.runJobErrByOperation[command.Operation]
+		}
 	}
 	return nil
 }
 
-func (f *appFakeRuntime) RunJobOutput(_ context.Context, job volustdocker.JobSpec) ([]byte, error) {
+func (f *appFakeRuntime) RunWorkerOutput(_ context.Context, worker volustdocker.WorkerSpec) ([]byte, error) {
+	command := worker.Commands[len(worker.Commands)-1]
+	job := appFakeJob{Name: worker.Name, Image: worker.Image, Operation: command.Operation, Args: command.Args, Mounts: worker.Mounts}
 	f.jobs = append(f.jobs, job)
 	f.events = append(f.events, "job:"+job.Operation)
 	if f.snapshotOutput != "" {
@@ -997,6 +1020,7 @@ func (f *appFakeRuntime) RunJobOutput(_ context.Context, job volustdocker.JobSpe
 	}
 	source := "data"
 	profile := "s3prod"
+	container := "postgres"
 	if len(job.Args) > 0 {
 		joined := strings.Join(job.Args, " ")
 		if strings.Contains(joined, "source:config") {
@@ -1005,8 +1029,11 @@ func (f *appFakeRuntime) RunJobOutput(_ context.Context, job volustdocker.JobSpe
 		if strings.Contains(joined, "profile:default") {
 			profile = "default"
 		}
+		if strings.Contains(joined, "container:redis") {
+			container = "redis"
+		}
 	}
-	return []byte(`[{"short_id":"snap-before-pre-backup","id":"snap-before-pre-backup","time":"2026-01-01T00:00:00Z","tags":["volust","app:postgres","profile:` + profile + `","source:` + source + `"]}]`), nil
+	return []byte(`[{"short_id":"snap-before-pre-backup","id":"snap-before-pre-backup","time":"2026-01-01T00:00:00Z","tags":["volust","app:postgres","container:` + container + `","profile:` + profile + `","source:` + source + `"]}]`), nil
 }
 
 func (f *appFakeRuntime) StopContainer(_ context.Context, id string) error {

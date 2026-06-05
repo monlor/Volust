@@ -5,15 +5,15 @@ services:
     restart: unless-stopped
     environment:
       TZ: Asia/Shanghai
-      # Storage root. Volust appends one repository directory per application.
-      VOLUST_S3_REPOSITORY: s3:s3.amazonaws.com/my-bucket/volust
+      # Node-level restic repository for this Volust service.
+      VOLUST_S3_REPOSITORY: s3:s3.amazonaws.com/my-bucket/volust/node-1
       RESTIC_PASSWORD: change-me
       AWS_ACCESS_KEY_ID: change-me
       AWS_SECRET_ACCESS_KEY: change-me
       AWS_DEFAULT_REGION: us-east-1
       VOLUST_DEFAULT_SCHEDULE: "0 3 * * *"
       VOLUST_DEFAULT_RETENTION: "keep-last=7,keep-daily=7,keep-weekly=4,keep-monthly=6"
-      VOLUST_JOB_IMAGE: ghcr.io/monlor/volust:latest
+      VOLUST_WORKER_IMAGE: ghcr.io/monlor/volust:latest
       VOLUST_INCLUDE_STOPPED_CONTAINERS: "false"
       VOLUST_STOP_CONTAINERS_BEFORE_BACKUP: "false"
       VOLUST_LOCK_TIMEOUT: 6h

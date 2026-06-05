@@ -37,18 +37,12 @@ func SourceLockKey(profile string, spec volustdocker.BackupSpec, source volustdo
 	return profile + "\x00" + spec.Name + "\x00" + source.ID
 }
 
-func RepositoryLockKey(profile config.Profile, appName string) string {
+func RepositoryLockKey(profile config.Profile) string {
 	if profile.Type == config.ProfileWebDAV {
 		path := strings.Trim(strings.TrimPrefix(profile.Path, "/"), "/")
-		appDir := config.AppRepositoryDir(appName)
-		if path == "" {
-			path = appDir
-		} else {
-			path += "/" + appDir
-		}
 		return "repo\x00webdav\x00" + strings.TrimRight(profile.WebDAV.URL, "/") + "\x00" + path
 	}
-	return "repo\x00" + profile.RepositoryStringForApp(appName)
+	return "repo\x00" + profile.RepositoryString()
 }
 
 func BackendWriteKey(profile config.Profile) string {

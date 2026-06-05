@@ -41,6 +41,7 @@ type Source struct {
 
 type BackupSpec struct {
 	ContainerID         string
+	ContainerName       string
 	ContainerRunning    bool
 	Name                string
 	Profile             string
@@ -75,7 +76,7 @@ func ParseBackupSpecWithDefaults(container Container, profiles map[string]config
 	if len(sourcePaths) == 0 {
 		return BackupSpec{}, fmt.Errorf("no backup sources found")
 	}
-	scheduleExpr := defaultString(container.Labels["volust.schedule"], defaults.Schedule)
+	scheduleExpr := strings.TrimSpace(defaults.Schedule)
 	schedule, err := policy.ParseSchedule(scheduleExpr)
 	if err != nil {
 		return BackupSpec{}, err
@@ -98,9 +99,17 @@ func ParseBackupSpecWithDefaults(container Container, profiles map[string]config
 	if name == "" {
 		name = strings.TrimPrefix(container.Name, "/")
 	}
+	containerName := strings.TrimPrefix(container.Name, "/")
+	if containerName == "" {
+		containerName = container.ID
+	}
+	if name == "" {
+		name = containerName
+	}
 
 	return BackupSpec{
 		ContainerID:         container.ID,
+		ContainerName:       containerName,
 		ContainerRunning:    container.Running,
 		Name:                name,
 		Profile:             profileName,
