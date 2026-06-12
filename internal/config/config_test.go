@@ -237,6 +237,32 @@ func TestLoadPreservesLiteralDollarInConfigValues(t *testing.T) {
 	}
 }
 
+func TestForAppExtendsRepositoryPathPerService(t *testing.T) {
+	s3 := Profile{Type: ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/volust", Password: "secret"}
+	s3app := s3.ForApp("postgres")
+	if got := s3app.RepositoryString(); got != "s3:s3.amazonaws.com/bucket/volust/postgres" {
+		t.Fatalf("s3 ForApp repository = %q", got)
+	}
+	if got := s3.RepositoryString(); got != "s3:s3.amazonaws.com/bucket/volust" {
+		t.Fatalf("original s3 repository mutated = %q", got)
+	}
+	if s3app.BackendKey() != s3.BackendKey() {
+		t.Fatalf("ForApp should not change backend key: %q != %q", s3app.BackendKey(), s3.BackendKey())
+	}
+
+	dav := Profile{Type: ProfileWebDAV, Path: "backups", Password: "secret", WebDAV: WebDAVConfig{URL: "https://dav.example.com"}}
+	davapp := dav.ForApp("postgres")
+	if got := davapp.RepositoryString(); got != "rclone:volust_webdav:backups/postgres" {
+		t.Fatalf("webdav ForApp repository = %q", got)
+	}
+	if got := dav.RepositoryString(); got != "rclone:volust_webdav:backups" {
+		t.Fatalf("original webdav repository mutated = %q", got)
+	}
+	if davapp.BackendKey() != dav.BackendKey() {
+		t.Fatalf("ForApp should not change webdav backend key: %q != %q", davapp.BackendKey(), dav.BackendKey())
+	}
+}
+
 func TestAppRepositoryDirSanitizesUnsafeNamesWithStableHash(t *testing.T) {
 	if got := AppRepositoryDir("postgres"); got != "postgres" {
 		t.Fatalf("safe app repository dir = %q", got)

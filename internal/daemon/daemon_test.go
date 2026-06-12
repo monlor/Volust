@@ -267,7 +267,7 @@ func TestRunPruneJobSerializesSameAppRepository(t *testing.T) {
 	}
 }
 
-func TestRunPruneJobSerializesSameNodeRepositoryAcrossApps(t *testing.T) {
+func TestRunPruneJobAllowsDifferentAppsToRunConcurrently(t *testing.T) {
 	runtime := &lockingRuntime{release: make(chan struct{})}
 	profile := config.Profile{Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app", Password: "secret"}
 
@@ -285,21 +285,21 @@ func TestRunPruneJobSerializesSameNodeRepositoryAcrossApps(t *testing.T) {
 			t.Errorf("runPruneJob B returned error: %v", err)
 		}
 	}()
-	for atomic.LoadInt32(&runtime.started) == 0 {
-		time.Sleep(time.Millisecond)
-	}
-	if got := atomic.LoadInt32(&runtime.maxRunning); got != 1 {
-		close(runtime.release)
-		wg.Wait()
-		t.Fatalf("prune jobs overlapped before release, maxRunning=%d", got)
+	deadline := time.After(time.Second)
+	for atomic.LoadInt32(&runtime.started) < 2 {
+		select {
+		case <-deadline:
+			close(runtime.release)
+			wg.Wait()
+			t.Fatalf("different app prune jobs did not start concurrently, started=%d", atomic.LoadInt32(&runtime.started))
+		default:
+			time.Sleep(time.Millisecond)
+		}
 	}
 	close(runtime.release)
 	wg.Wait()
-	if got := atomic.LoadInt32(&runtime.started); got != 2 {
-		t.Fatalf("started = %d", got)
-	}
-	if got := atomic.LoadInt32(&runtime.maxRunning); got != 1 {
-		t.Fatalf("same node repository prune jobs overlapped, maxRunning=%d", got)
+	if got := atomic.LoadInt32(&runtime.maxRunning); got != 2 {
+		t.Fatalf("different app prune jobs did not run concurrently, maxRunning=%d", got)
 	}
 }
 
@@ -504,6 +504,8 @@ func TestRunSourceJobsSerializesSameSource(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	if got := atomic.LoadInt32(&runtime.maxRunning); got != 1 {
+		close(runtime.release)
+		wg.Wait()
 		t.Fatalf("jobs overlapped before release, maxRunning=%d", got)
 	}
 	close(runtime.release)
@@ -513,7 +515,7 @@ func TestRunSourceJobsSerializesSameSource(t *testing.T) {
 	}
 }
 
-func TestRunSourceJobsSerializesSamePhysicalVolumeAcrossApps(t *testing.T) {
+func TestRunSourceJobsAllowsDifferentAppsOnSharedVolumeToRunConcurrently(t *testing.T) {
 	runtime := &lockingRuntime{release: make(chan struct{})}
 	profile := config.Profile{Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app", Password: "secret"}
 	specA := volustdocker.BackupSpec{
@@ -549,16 +551,21 @@ func TestRunSourceJobsSerializesSamePhysicalVolumeAcrossApps(t *testing.T) {
 			t.Errorf("RunSourceJobs B returned error: %v", err)
 		}
 	}()
-	for atomic.LoadInt32(&runtime.started) == 0 {
-		time.Sleep(time.Millisecond)
-	}
-	if got := atomic.LoadInt32(&runtime.maxRunning); got != 1 {
-		t.Fatalf("jobs overlapped before release, maxRunning=%d", got)
+	deadline := time.After(time.Second)
+	for atomic.LoadInt32(&runtime.started) < 2 {
+		select {
+		case <-deadline:
+			close(runtime.release)
+			wg.Wait()
+			t.Fatalf("different app jobs on shared volume did not start concurrently, started=%d", atomic.LoadInt32(&runtime.started))
+		default:
+			time.Sleep(time.Millisecond)
+		}
 	}
 	close(runtime.release)
 	wg.Wait()
-	if got := atomic.LoadInt32(&runtime.maxRunning); got != 1 {
-		t.Fatalf("jobs overlapped, maxRunning=%d", got)
+	if got := atomic.LoadInt32(&runtime.maxRunning); got != 2 {
+		t.Fatalf("different app jobs on shared volume did not run concurrently, maxRunning=%d", got)
 	}
 }
 
@@ -602,6 +609,8 @@ func TestRunSourceJobsSerializesSameAppRepositoryAcrossSources(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	if got := atomic.LoadInt32(&runtime.maxRunning); got != 1 {
+		close(runtime.release)
+		wg.Wait()
 		t.Fatalf("jobs overlapped before release, maxRunning=%d", got)
 	}
 	close(runtime.release)
@@ -611,7 +620,7 @@ func TestRunSourceJobsSerializesSameAppRepositoryAcrossSources(t *testing.T) {
 	}
 }
 
-func TestRunSourceJobsSerializesSameNodeRepositoryAcrossApps(t *testing.T) {
+func TestRunSourceJobsAllowsDifferentAppsInSameProfileToRunConcurrently(t *testing.T) {
 	runtime := &lockingRuntime{release: make(chan struct{})}
 	profileA := config.Profile{Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app", Password: "secret"}
 	profileB := config.Profile{Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app", Password: "secret"}
@@ -648,21 +657,21 @@ func TestRunSourceJobsSerializesSameNodeRepositoryAcrossApps(t *testing.T) {
 			t.Errorf("RunSourceJobs B returned error: %v", err)
 		}
 	}()
-	for atomic.LoadInt32(&runtime.started) == 0 {
-		time.Sleep(time.Millisecond)
-	}
-	if got := atomic.LoadInt32(&runtime.maxRunning); got != 1 {
-		close(runtime.release)
-		wg.Wait()
-		t.Fatalf("jobs overlapped before release, maxRunning=%d", got)
+	deadline := time.After(time.Second)
+	for atomic.LoadInt32(&runtime.started) < 2 {
+		select {
+		case <-deadline:
+			close(runtime.release)
+			wg.Wait()
+			t.Fatalf("different app jobs did not start concurrently, started=%d", atomic.LoadInt32(&runtime.started))
+		default:
+			time.Sleep(time.Millisecond)
+		}
 	}
 	close(runtime.release)
 	wg.Wait()
-	if got := atomic.LoadInt32(&runtime.started); got != 2 {
-		t.Fatalf("started = %d", got)
-	}
-	if got := atomic.LoadInt32(&runtime.maxRunning); got != 1 {
-		t.Fatalf("same node repository jobs overlapped, maxRunning=%d", got)
+	if got := atomic.LoadInt32(&runtime.maxRunning); got != 2 {
+		t.Fatalf("different app jobs did not run concurrently, maxRunning=%d", got)
 	}
 }
 
@@ -938,6 +947,8 @@ func TestRunSourceJobsStillSerializesSameAppRepositoryBeforeBackendWriteLimit(t 
 		time.Sleep(time.Millisecond)
 	}
 	if got := atomic.LoadInt32(&runtime.maxRunning); got != 1 {
+		close(runtime.release)
+		wg.Wait()
 		t.Fatalf("same app repository jobs overlapped before release, maxRunning=%d", got)
 	}
 	close(runtime.release)

@@ -173,6 +173,21 @@ func (p Profile) BackendKey() string {
 	}
 }
 
+func (p Profile) ForApp(appName string) Profile {
+	derived := p
+	dir := AppRepositoryDir(appName)
+	switch p.Type {
+	case ProfileS3:
+		derived.Repository = strings.TrimRight(p.Repository, "/") + "/" + dir
+	case ProfileWebDAV:
+		derived.Path = strings.TrimRight(p.Path, "/") + "/" + dir
+	default:
+		// validate() rejects unknown types at config load time;
+		// if a new profile type is added, update this switch too.
+	}
+	return derived
+}
+
 func AppRepositoryDir(appName string) string {
 	value := strings.TrimSpace(appName)
 	if value == "" {

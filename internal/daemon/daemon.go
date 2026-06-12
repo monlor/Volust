@@ -192,16 +192,17 @@ func RunSourceJobs(ctx context.Context, runtime Runtime, options Options, profil
 }
 
 func RunSpecJobs(ctx context.Context, runtime Runtime, options Options, profile config.Profile, spec volustdocker.BackupSpec, sources []volustdocker.Source, includePrune bool) (int, error) {
+	appProfile := profile.ForApp(spec.Name)
 	if !options.AssumeLocked {
 		var jobsStarted int
-		err := WithSourceLock(ctx, RepositoryLockKey(profile), func() error {
+		err := WithSourceLock(ctx, RepositoryLockKey(appProfile), func() error {
 			var err error
-			jobsStarted, err = runSpecJobsLocked(ctx, runtime, options, profile, spec, sources, includePrune)
+			jobsStarted, err = runSpecJobsLocked(ctx, runtime, options, appProfile, spec, sources, includePrune)
 			return err
 		})
 		return jobsStarted, err
 	}
-	return runSpecJobsLocked(ctx, runtime, options, profile, spec, sources, includePrune)
+	return runSpecJobsLocked(ctx, runtime, options, appProfile, spec, sources, includePrune)
 }
 
 func runSpecJobsLocked(ctx context.Context, runtime Runtime, options Options, profile config.Profile, spec volustdocker.BackupSpec, sources []volustdocker.Source, includePrune bool) (int, error) {
@@ -290,19 +291,20 @@ func runPruneJob(ctx context.Context, runtime Runtime, options Options, profile 
 	if options.WorkerImage == "" {
 		options.WorkerImage = "volust:latest"
 	}
-	command := restic.PruneCommand(profile)
+	appProfile := profile.ForApp(name)
+	command := restic.PruneCommand(appProfile)
 	worker := volustdocker.WorkerSpec{
 		Name:  volustdocker.WorkerName("prune", name),
 		Image: options.WorkerImage,
-		Env:   profile.ResticEnv(),
+		Env:   appProfile.ResticEnv(),
 		Commands: []volustdocker.WorkerCommand{{
 			Operation: command.Operation,
 			Args:      command.Args,
 			Env:       command.Env,
 		}},
 	}
-	return WithSourceLock(ctx, RepositoryLockKey(profile), func() error {
-		return withWriteSlot(ctx, options, profile, func() error {
+	return WithSourceLock(ctx, RepositoryLockKey(appProfile), func() error {
+		return withWriteSlot(ctx, options, appProfile, func() error {
 			return runtime.RunWorker(ctx, worker)
 		})
 	})

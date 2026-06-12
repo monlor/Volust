@@ -368,14 +368,15 @@ func restoreSnapshotKey(candidate restoreCandidate) string {
 
 func restoreCandidateWithSnapshot(ctx context.Context, runtime daemonRuntime, cfg config.Config, profileName string, selected restoreCandidate, snapshotID string, skipPreBackup bool, limiter *daemon.WriteLimiter) error {
 	profileCfg := cfg.Profiles[profileName]
-	return daemon.WithSourceLock(ctx, daemon.RepositoryLockKey(profileCfg), func() error {
+	appProfile := profileCfg.ForApp(selected.Spec.Name)
+	return daemon.WithSourceLock(ctx, daemon.RepositoryLockKey(appProfile), func() error {
 		return daemon.WithSourceLock(ctx, daemon.SourceLockKey(profileName, selected.Spec, selected.Source), func() error {
-			return limiter.With(ctx, daemon.BackendWriteKey(profileCfg), func() error {
+			return limiter.With(ctx, daemon.BackendWriteKey(appProfile), func() error {
 				stopped, err := stopMountedContainers(ctx, runtime, selected)
 				if err != nil {
 					return err
 				}
-				return restoreWithStoppedContainers(ctx, runtime, cfg, profileName, selected.Spec.Name, selected.Source.ID, snapshotID, skipPreBackup, selected, stopped)
+				return restoreWithStoppedContainers(ctx, runtime, appProfile, profileName, selected.Spec.Name, selected.Source.ID, snapshotID, skipPreBackup, selected, stopped)
 			})
 		})
 	})
@@ -395,8 +396,7 @@ func loadConfigAndProfile(configPath, profileName string) (config.Config, string
 	return cfg, profileName, nil
 }
 
-func restoreWithStoppedContainers(ctx context.Context, runtime daemonRuntime, cfg config.Config, profileName, appName, sourceID, snapshotID string, skipPreBackup bool, selected restoreCandidate, stopped []string) error {
-	profileCfg := cfg.Profiles[profileName]
+func restoreWithStoppedContainers(ctx context.Context, runtime daemonRuntime, appProfile config.Profile, profileName, appName, sourceID, snapshotID string, skipPreBackup bool, selected restoreCandidate, stopped []string) error {
 	if !skipPreBackup {
 		if err := daemon.LoadExcludeFiles("/etc/volust/excludes", &selected.Spec); err != nil {
 			return restartContainers(ctx, runtime, stopped, err)
@@ -411,10 +411,10 @@ func restoreWithStoppedContainers(ctx context.Context, runtime daemonRuntime, cf
 		volustdocker.JobMount{Type: "volume", Target: "/volust/staging"},
 	)
 	if !skipPreBackup {
-		backup := restic.BackupCommand(profileCfg, selected.Spec, selected.Source, nil)
+		backup := restic.BackupCommand(appProfile, selected.Spec, selected.Source, nil)
 		commands = append(commands, volustdocker.WorkerCommand{Operation: backup.Operation, Args: backup.Args, Env: backup.Env})
 	}
-	command := restic.RestoreCommand(cfg.Profiles[profileName], restic.RestoreRequest{
+	command := restic.RestoreCommand(appProfile, restic.RestoreRequest{
 		SnapshotID: snapshotID,
 		App:        appName,
 		Container:  selected.Spec.ContainerName,
@@ -426,7 +426,7 @@ func restoreWithStoppedContainers(ctx context.Context, runtime daemonRuntime, cf
 	worker := volustdocker.WorkerSpec{
 		Name:     volustdocker.WorkerName("restore", appName+"-"+sourceID),
 		Image:    workerImage(),
-		Env:      profileCfg.ResticEnv(),
+		Env:      appProfile.ResticEnv(),
 		Mounts:   mounts,
 		Commands: commands,
 	}
@@ -488,11 +488,12 @@ func resolveSnapshot(ctx context.Context, runtime daemonRuntime, profile config.
 }
 
 func querySnapshots(ctx context.Context, runtime daemonRuntime, profile config.Profile, request restic.RestoreRequest) ([]restic.Snapshot, error) {
-	command := restic.SnapshotsCommand(profile, request)
+	appProfile := profile.ForApp(request.App)
+	command := restic.SnapshotsCommand(appProfile, request)
 	worker := volustdocker.WorkerSpec{
 		Name:  volustdocker.WorkerName("snapshots", request.App+"-"+request.SourceID),
 		Image: workerImage(),
-		Env:   profile.ResticEnv(),
+		Env:   appProfile.ResticEnv(),
 		Commands: []volustdocker.WorkerCommand{{
 			Operation: command.Operation,
 			Args:      command.Args,
