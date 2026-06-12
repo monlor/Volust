@@ -26,3 +26,6 @@ config.yml
 *.swo
 .idea/
 .vscode/
+
+# Code graph (auto-generated)
+.codegraph/
