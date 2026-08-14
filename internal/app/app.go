@@ -329,21 +329,33 @@ func runRestoreAllVolumes(ctx context.Context, runtime daemonRuntime, cfg config
 	}
 
 	profileCfg := cfg.Profiles[profileName]
-	resolved, err := resolveRestoreSnapshots(ctx, runtime, profileCfg, profileName, snapshotID, selected)
-	if err != nil {
-		return err
-	}
+	resolved, preflightFailures := resolveRestoreSnapshots(ctx, runtime, profileCfg, profileName, snapshotID, selected)
 	limiter, err := maxConcurrentWritesLimiter()
 	if err != nil {
 		return err
 	}
+	var succeeded []restoreCandidate
+	failed := make(map[string]error)
 	for _, candidate := range selected {
 		key := restoreSnapshotKey(candidate)
+		if err := preflightFailures[key]; err != nil {
+			failed[key] = fmt.Errorf("snapshot preflight: %w", err)
+			continue
+		}
 		if err := restoreCandidateWithSnapshot(ctx, runtime, cfg, profileName, candidate, resolved[key], skipPreBackup, limiter); err != nil {
-			return err
+			failed[key] = err
+			continue
+		}
+		succeeded = append(succeeded, candidate)
+	}
+	writeRestoreAllVolumesSummary(out, selected, succeeded, failed)
+	if len(failed) > 0 {
+		for _, candidate := range selected {
+			if err := failed[restoreSnapshotKey(candidate)]; err != nil {
+				return fmt.Errorf("restore completed with failures: failed=%d succeeded=%d: %w", len(failed), len(succeeded), err)
+			}
 		}
 	}
-	fmt.Fprintf(out, "restore jobs completed: volumes=%d\n", len(selected))
 	return nil
 }
 
@@ -356,8 +368,27 @@ func confirmRestore(reader *bufio.Reader, out io.Writer, phrase string) error {
 	return nil
 }
 
-func resolveRestoreSnapshots(ctx context.Context, runtime daemonRuntime, profile config.Profile, profileName, snapshotID string, selected []restoreCandidate) (map[string]string, error) {
+func writeRestoreAllVolumesSummary(out io.Writer, selected, succeeded []restoreCandidate, failed map[string]error) {
+	fmt.Fprintf(out, "restore jobs completed: volumes=%d succeeded=%d failed=%d\n", len(selected), len(succeeded), len(failed))
+	if len(succeeded) > 0 {
+		fmt.Fprintln(out, "Succeeded:")
+		for _, candidate := range succeeded {
+			fmt.Fprintf(out, "  %s/%s -> %s\n", candidate.Spec.Name, candidate.Source.ID, candidate.Source.VolumeName)
+		}
+	}
+	if len(failed) > 0 {
+		fmt.Fprintln(out, "Failed:")
+		for _, candidate := range selected {
+			if err := failed[restoreSnapshotKey(candidate)]; err != nil {
+				fmt.Fprintf(out, "  %s/%s -> %s: %v\n", candidate.Spec.Name, candidate.Source.ID, candidate.Source.VolumeName, err)
+			}
+		}
+	}
+}
+
+func resolveRestoreSnapshots(ctx context.Context, runtime daemonRuntime, profile config.Profile, profileName, snapshotID string, selected []restoreCandidate) (map[string]string, map[string]error) {
 	resolved := make(map[string]string, len(selected))
+	failed := make(map[string]error)
 	for _, candidate := range selected {
 		snapshot, err := resolveSnapshot(ctx, runtime, profile, restic.RestoreRequest{
 			SnapshotID: snapshotID,
@@ -367,11 +398,12 @@ func resolveRestoreSnapshots(ctx context.Context, runtime daemonRuntime, profile
 			SourceID:   candidate.Source.ID,
 		})
 		if err != nil {
-			return nil, err
+			failed[restoreSnapshotKey(candidate)] = err
+			continue
 		}
 		resolved[restoreSnapshotKey(candidate)] = snapshot
 	}
-	return resolved, nil
+	return resolved, failed
 }
 
 func restoreSnapshotKey(candidate restoreCandidate) string {

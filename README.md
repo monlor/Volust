@@ -114,7 +114,7 @@ docker exec -it volust volust snapshots --profile default --repository-path volu
 docker exec -it volust volust restore --profile default --repository-path volust/old-node-1 --all-volumes
 ```
 
-Restore is destructive. Volust prints a confirmation phrase and will not start the restore job until you type it exactly. Single-source restore uses `RESTORE <app>/<source>`. All-volume restore uses `RESTORE ALL VOLUMES`, restores only Volust-discovered named volume sources, and excludes bind mounts. By default, restore first stops containers that are currently using the selected volume, runs a safety backup for the selected source, restores the selected snapshot, and then restores containers to their previous running state. A container that was stopped before restore stays stopped. Use `--skip-pre-backup` only when you explicitly do not want the safety backup.
+Restore is destructive. Volust prints a confirmation phrase and will not start the restore job until you type it exactly. Single-source restore uses `RESTORE <app>/<source>`. All-volume restore uses `RESTORE ALL VOLUMES`, restores only Volust-discovered named volume sources, and excludes bind mounts. It continues after an individual volume's snapshot preflight or restore fails, then prints separate success and failure lists and exits non-zero if any volume failed. By default, restore first stops containers that are currently using the selected volume, runs a safety backup for the selected source, restores the selected snapshot, and then restores containers to their previous running state. A container that was stopped before restore stays stopped. Use `--skip-pre-backup` only when you explicitly do not want the safety backup.
 
 ## Docker Compose
 

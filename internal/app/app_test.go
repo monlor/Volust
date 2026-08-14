@@ -605,6 +605,50 @@ func TestRunRestoreAllVolumesFlagBypassesModePrompt(t *testing.T) {
 	}
 }
 
+func TestRunRestoreAllVolumesContinuesAfterVolumeFailureAndReportsResults(t *testing.T) {
+	path := writeConfig(t)
+	fake := &appFakeRuntime{
+		containers: []volustdocker.Container{
+			{
+				ID: "pg", Name: "/postgres",
+				Labels: map[string]string{"volust.enabled": "true", "volust.profile": "s3prod", "volust.sources": "/data"},
+				Mounts: []volustdocker.Mount{{Type: "volume", Name: "pgdata", Destination: "/data"}},
+			},
+			{
+				ID: "redis", Name: "/redis",
+				Labels: map[string]string{"volust.enabled": "true", "volust.profile": "s3prod", "volust.sources": "/data"},
+				Mounts: []volustdocker.Mount{{Type: "volume", Name: "redisdata", Destination: "/data"}},
+			},
+		},
+		snapshotOutput: `[
+			{"short_id":"pg-snap","id":"pg-snap","time":"2026-01-02T00:00:00Z","tags":["volust","app:postgres","container:postgres","profile:s3prod","source:data"]},
+			{"short_id":"redis-snap","id":"redis-snap","time":"2026-01-02T00:00:00Z","tags":["volust","app:redis","container:redis","profile:s3prod","source:data"]}
+		]`,
+		runJobErrByName: map[string]error{"volust-restore-postgres-data": errors.New("rclone config is missing")},
+	}
+	oldRuntime := newRuntime
+	newRuntime = func() (daemonRuntime, error) { return fake, nil }
+	defer func() { newRuntime = oldRuntime }()
+
+	var out bytes.Buffer
+	err := Run([]string{"restore", "--config", path, "--profile", "s3prod", "--all-volumes", "--skip-pre-backup"}, strings.NewReader("RESTORE ALL VOLUMES\n"), &out)
+	if err == nil || !strings.Contains(err.Error(), "failed=1 succeeded=1") {
+		t.Fatalf("error = %v", err)
+	}
+	if !equalStrings(fake.events, []string{"job:snapshots", "job:snapshots", "job:restore", "job:restore"}) {
+		t.Fatalf("events = %#v", fake.events)
+	}
+	for _, want := range []string{
+		"restore jobs completed: volumes=2 succeeded=1 failed=1",
+		"Succeeded:", "redis/data -> redisdata",
+		"Failed:", "postgres/data -> pgdata: rclone config is missing",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("output %q does not contain %q", out.String(), want)
+		}
+	}
+}
+
 func TestRunRestoreAllVolumesConfirmationMismatchPreventsWork(t *testing.T) {
 	path := writeConfig(t)
 	fake := &appFakeRuntime{
@@ -977,6 +1021,7 @@ type appFakeRuntime struct {
 	sawIncludeStopped       bool
 	sawCanceledStartContext bool
 	runJobErrByOperation    map[string]error
+	runJobErrByName         map[string]error
 	snapshotOutput          string
 }
 
@@ -1011,6 +1056,9 @@ func (f *appFakeRuntime) RunWorker(_ context.Context, worker volustdocker.Worker
 		f.events = append(f.events, "job:"+command.Operation)
 		if f.runJobErrByOperation != nil {
 			return f.runJobErrByOperation[command.Operation]
+		}
+		if f.runJobErrByName != nil {
+			return f.runJobErrByName[worker.Name]
 		}
 	}
 	return nil
