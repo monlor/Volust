@@ -788,12 +788,15 @@ func TestRunSnapshotsUsesParameters(t *testing.T) {
 	}()
 
 	var out bytes.Buffer
-	err := Run([]string{"snapshots", "--config", path, "--profile", "s3prod", "--app", "postgres", "--source", "data"}, strings.NewReader(""), &out)
+	err := Run([]string{"snapshots", "--config", path, "--profile", "s3prod", "--repository-path", "migration/node-2", "--app", "postgres", "--source", "data"}, strings.NewReader(""), &out)
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
 	if strings.Contains(out.String(), "Select application") || !strings.Contains(out.String(), "snap-1") {
 		t.Fatalf("snapshots output = %q", out.String())
+	}
+	if got := strings.Join(fake.jobs[0].Args, " "); !strings.Contains(got, "s3:s3.amazonaws.com/bucket/migration/node-2/postgres") {
+		t.Fatalf("snapshots command = %q", got)
 	}
 }
 
@@ -862,7 +865,7 @@ func TestRunBackupUsesAppParameterAndBacksUpAllSources(t *testing.T) {
 	}()
 
 	var out bytes.Buffer
-	err := Run([]string{"backup", "--config", path, "--profile", "s3prod", "--app", "postgres"}, strings.NewReader(""), &out)
+	err := Run([]string{"backup", "--config", path, "--profile", "s3prod", "--repository-path", "migration/node-2", "--app", "postgres"}, strings.NewReader(""), &out)
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
@@ -871,6 +874,9 @@ func TestRunBackupUsesAppParameterAndBacksUpAllSources(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "backup complete: app=postgres sources=2 jobs_started=5") {
 		t.Fatalf("backup output = %q", out.String())
+	}
+	if got := strings.Join(fake.jobs[0].Args, " "); !strings.Contains(got, "s3:s3.amazonaws.com/bucket/migration/node-2/postgres") {
+		t.Fatalf("backup command = %q", got)
 	}
 }
 

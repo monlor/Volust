@@ -263,6 +263,31 @@ func TestForAppExtendsRepositoryPathPerService(t *testing.T) {
 	}
 }
 
+func TestWithRepositoryPathUsesConfiguredBackendAndRejectsInvalidOverrides(t *testing.T) {
+	profile := Profile{Type: ProfileWebDAV, Path: "volust/node-1", WebDAV: WebDAVConfig{URL: "https://dav.example.com/backups"}}
+	got, err := profile.WithRepositoryPath("/migration/node-2/")
+	if err != nil {
+		t.Fatalf("WithRepositoryPath returned error: %v", err)
+	}
+	if got.Path != "migration/node-2" || got.WebDAV.URL != profile.WebDAV.URL {
+		t.Fatalf("profile = %#v", got)
+	}
+	if _, err := profile.WithRepositoryPath("../other"); err == nil {
+		t.Fatal("WithRepositoryPath accepted parent traversal")
+	}
+	s3 := Profile{Type: ProfileS3, Repository: "s3:s3.amazonaws.com/backups/volust/node-1"}
+	got, err = s3.WithRepositoryPath("migration/node-2")
+	if err != nil {
+		t.Fatalf("WithRepositoryPath returned error: %v", err)
+	}
+	if got.Repository != "s3:s3.amazonaws.com/backups/migration/node-2" {
+		t.Fatalf("repository = %q", got.Repository)
+	}
+	if _, err := (Profile{Type: "local"}).WithRepositoryPath("migration/node-2"); err == nil {
+		t.Fatal("WithRepositoryPath accepted an unsupported profile")
+	}
+}
+
 func TestAppRepositoryDirSanitizesUnsafeNamesWithStableHash(t *testing.T) {
 	if got := AppRepositoryDir("postgres"); got != "postgres" {
 		t.Fatalf("safe app repository dir = %q", got)

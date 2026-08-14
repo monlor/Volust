@@ -188,6 +188,42 @@ func (p Profile) ForApp(appName string) Profile {
 	return derived
 }
 
+// WithRepositoryPath returns this profile pointed at another repository path
+// on the configured backend. For S3, path is relative to the configured
+// bucket; for WebDAV, it is relative to the configured remote root.
+func (p Profile) WithRepositoryPath(path string) (Profile, error) {
+	path, err := normalizeRepositoryPath(path)
+	if err != nil {
+		return Profile{}, err
+	}
+	switch p.Type {
+	case ProfileS3:
+		endpoint, bucket, ok := parseS3RepositoryRoot(p.Repository)
+		if !ok {
+			return Profile{}, fmt.Errorf("s3 repository path override requires repository in s3:endpoint/bucket[/path] form")
+		}
+		p.Repository = "s3:" + endpoint + "/" + bucket + "/" + path
+	case ProfileWebDAV:
+		p.Path = path
+	default:
+		return Profile{}, fmt.Errorf("repository path override is unsupported for profile type %q", p.Type)
+	}
+	return p, nil
+}
+
+func normalizeRepositoryPath(path string) (string, error) {
+	path = strings.Trim(strings.TrimSpace(path), "/")
+	if path == "" {
+		return "", fmt.Errorf("repository path override must not be empty")
+	}
+	for _, segment := range strings.Split(path, "/") {
+		if segment == "." || segment == ".." || segment == "" {
+			return "", fmt.Errorf("repository path override must not contain empty, . or .. segments")
+		}
+	}
+	return path, nil
+}
+
 func AppRepositoryDir(appName string) string {
 	value := strings.TrimSpace(appName)
 	if value == "" {

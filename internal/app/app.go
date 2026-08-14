@@ -146,11 +146,15 @@ func runSnapshots(args []string, in io.Reader, out io.Writer) error {
 	appName := fs.String("app", "", "application name")
 	source := fs.String("source", "", "source id")
 	snapshot := fs.String("snapshot", "", "optional snapshot id, for example latest")
+	repositoryPath := fs.String("repository-path", "", "use another path on the configured storage backend")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	cfg, profileName, err := loadConfigAndProfile(*configPath, *profile)
 	if err != nil {
+		return err
+	}
+	if err := overrideRepositoryPath(&cfg, profileName, *repositoryPath); err != nil {
 		return err
 	}
 	reader := bufio.NewReader(in)
@@ -193,11 +197,15 @@ func runBackup(args []string, in io.Reader, out io.Writer) error {
 	profile := fs.String("profile", "", "profile name")
 	appName := fs.String("app", "", "application name")
 	source := fs.String("source", "", "optional source id")
+	repositoryPath := fs.String("repository-path", "", "use another path on the configured storage backend")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	cfg, profileName, err := loadConfigAndProfile(*configPath, *profile)
 	if err != nil {
+		return err
+	}
+	if err := overrideRepositoryPath(&cfg, profileName, *repositoryPath); err != nil {
 		return err
 	}
 	reader := bufio.NewReader(in)
@@ -240,6 +248,7 @@ func runRestore(args []string, in io.Reader, out io.Writer) error {
 	snapshot := fs.String("snapshot", "latest", "snapshot id")
 	skipPreBackup := fs.Bool("skip-pre-backup", false, "skip safety backup before restore")
 	allVolumes := fs.Bool("all-volumes", false, "restore all discovered Docker named volume sources")
+	repositoryPath := fs.String("repository-path", "", "use another path on the configured storage backend")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -248,6 +257,9 @@ func runRestore(args []string, in io.Reader, out io.Writer) error {
 		return err
 	}
 	*profile = profileName
+	if err := overrideRepositoryPath(&cfg, *profile, *repositoryPath); err != nil {
+		return err
+	}
 	reader := bufio.NewReader(in)
 	runtime, err := newRuntime()
 	if err != nil {
@@ -394,6 +406,18 @@ func loadConfigAndProfile(configPath, profileName string) (config.Config, string
 		return config.Config{}, "", fmt.Errorf("unknown profile %q", profileName)
 	}
 	return cfg, profileName, nil
+}
+
+func overrideRepositoryPath(cfg *config.Config, profileName, path string) error {
+	if path == "" {
+		return nil
+	}
+	profile, err := cfg.Profiles[profileName].WithRepositoryPath(path)
+	if err != nil {
+		return err
+	}
+	cfg.Profiles[profileName] = profile
+	return nil
 }
 
 func restoreWithStoppedContainers(ctx context.Context, runtime daemonRuntime, appProfile config.Profile, profileName, appName, sourceID, snapshotID string, skipPreBackup bool, selected restoreCandidate, stopped []string) error {
