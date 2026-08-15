@@ -83,6 +83,13 @@ func SnapshotsCommand(profile config.Profile, request RestoreRequest) Command {
 	return Command{Operation: "snapshots", Args: args, Env: profile.ResticEnv()}
 }
 
+// ListCommand lists the files recorded for one already-resolved snapshot.
+func ListCommand(profile config.Profile, snapshotID string) Command {
+	args := baseArgs(profile, "ls")
+	args = append(args, snapshotID)
+	return Command{Operation: "ls", Args: args, Env: profile.ResticEnv()}
+}
+
 func LatestSnapshot(snapshots []Snapshot, app, container, profile, source string) (Snapshot, bool) {
 	required := map[string]bool{
 		"volust":             false,

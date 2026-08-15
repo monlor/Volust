@@ -46,6 +46,8 @@ func Run(args []string, in io.Reader, out io.Writer) error {
 		return runApps(args[1:], out)
 	case "snapshots":
 		return runSnapshots(args[1:], in, out)
+	case "ls":
+		return runList(args[1:], in, out)
 	case "backup":
 		return runBackup(args[1:], in, out)
 	case "restore":
@@ -190,6 +192,66 @@ func runSnapshots(args []string, in io.Reader, out io.Writer) error {
 	return nil
 }
 
+func runList(args []string, in io.Reader, out io.Writer) error {
+	fs := flag.NewFlagSet("ls", flag.ContinueOnError)
+	fs.SetOutput(out)
+	configPath := fs.String("config", "", "optional path to config.yaml")
+	profile := fs.String("profile", "", "profile name")
+	appName := fs.String("app", "", "application name")
+	source := fs.String("source", "", "source id")
+	snapshot := fs.String("snapshot", "latest", "snapshot id (default latest)")
+	repositoryPath := fs.String("repository-path", "", "use another path on the configured storage backend")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, profileName, err := loadConfigAndProfile(*configPath, *profile)
+	if err != nil {
+		return err
+	}
+	if err := overrideRepositoryPath(&cfg, profileName, *repositoryPath); err != nil {
+		return err
+	}
+	runtime, err := newRuntime()
+	if err != nil {
+		return err
+	}
+	reader := bufio.NewReader(in)
+	selected, err := resolveRestoreSelection(context.Background(), runtime, cfg, profileName, *appName, *source, reader, out)
+	if err != nil {
+		return err
+	}
+	resolvedSnapshot, err := resolveSnapshot(context.Background(), runtime, cfg.Profiles[profileName], restic.RestoreRequest{
+		SnapshotID: *snapshot,
+		App:        selected.Spec.Name,
+		Container:  selected.Spec.ContainerName,
+		Profile:    profileName,
+		SourceID:   selected.Source.ID,
+	})
+	if err != nil {
+		return err
+	}
+	command := restic.ListCommand(cfg.Profiles[profileName].ForApp(selected.Spec.Name), resolvedSnapshot)
+	output, err := runtime.RunWorkerOutput(context.Background(), volustdocker.WorkerSpec{
+		Name:  volustdocker.WorkerName("ls", selected.Spec.Name+"-"+selected.Source.ID),
+		Image: workerImage(),
+		Env:   cfg.Profiles[profileName].ForApp(selected.Spec.Name).ResticEnv(),
+		Commands: []volustdocker.WorkerCommand{{
+			Operation: command.Operation,
+			Args:      command.Args,
+			Env:       command.Env,
+		}},
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "Files for profile=%s app=%s source=%s snapshot=%s\n", profileName, selected.Spec.Name, selected.Source.ID, resolvedSnapshot)
+	fmt.Fprint(out, string(output))
+	if len(output) > 0 && output[len(output)-1] != '\n' {
+		fmt.Fprintln(out)
+	}
+	return nil
+}
+
 func runBackup(args []string, in io.Reader, out io.Writer) error {
 	fs := flag.NewFlagSet("backup", flag.ContinueOnError)
 	fs.SetOutput(out)
@@ -245,7 +307,7 @@ func runRestore(args []string, in io.Reader, out io.Writer) error {
 	profile := fs.String("profile", "", "profile name")
 	appName := fs.String("app", "", "application name")
 	source := fs.String("source", "", "source id")
-	snapshot := fs.String("snapshot", "latest", "snapshot id")
+	snapshot := fs.String("snapshot", "", "snapshot id (default latest; omit to select interactively)")
 	skipPreBackup := fs.Bool("skip-pre-backup", false, "skip safety backup before restore")
 	allVolumes := fs.Bool("all-volumes", false, "restore all discovered Docker named volume sources")
 	repositoryPath := fs.String("repository-path", "", "use another path on the configured storage backend")
@@ -267,6 +329,7 @@ func runRestore(args []string, in io.Reader, out io.Writer) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	selectSnapshot := *snapshot == "" && (*appName == "" || *source == "")
 
 	if !*allVolumes && *appName == "" && *source == "" {
 		mode, err := promptChoice(reader, out, "Select restore mode", []string{"Restore one source", "Restore all volumes"})
@@ -276,6 +339,9 @@ func runRestore(args []string, in io.Reader, out io.Writer) error {
 		*allVolumes = mode == "Restore all volumes"
 	}
 	if *allVolumes {
+		if *snapshot == "" {
+			*snapshot = "latest"
+		}
 		return runRestoreAllVolumes(ctx, runtime, cfg, *profile, *snapshot, *skipPreBackup, reader, out)
 	}
 
@@ -285,25 +351,42 @@ func runRestore(args []string, in io.Reader, out io.Writer) error {
 	}
 	*appName = selected.Spec.Name
 	*source = selected.Source.ID
+	resolvedSnapshot := *snapshot
+	if selectSnapshot {
+		*snapshot, err = selectRestoreSnapshot(ctx, runtime, cfg.Profiles[*profile], restic.RestoreRequest{
+			App: *appName, Container: selected.Spec.ContainerName, Profile: *profile, SourceID: *source,
+		}, reader, out)
+		if err != nil {
+			return err
+		}
+		resolvedSnapshot = *snapshot
+	}
+	if *snapshot == "" {
+		*snapshot = "latest"
+		resolvedSnapshot = *snapshot
+	}
+
+	profileCfg := cfg.Profiles[*profile]
+	if !selectSnapshot {
+		resolvedSnapshot, err = resolveSnapshot(ctx, runtime, profileCfg, restic.RestoreRequest{
+			SnapshotID: *snapshot,
+			App:        *appName,
+			Container:  selected.Spec.ContainerName,
+			Profile:    *profile,
+			SourceID:   *source,
+		})
+		if err != nil {
+			return err
+		}
+	}
 
 	phrase := "RESTORE " + *appName + "/" + *source
-	fmt.Fprintf(out, "Profile: %s\nApplication: %s\nSource: %s\nSnapshot: %s\n", *profile, *appName, *source, *snapshot)
+	fmt.Fprintf(out, "Profile: %s\nApplication: %s\nSource: %s\nSnapshot: %s\n", *profile, *appName, *source, resolvedSnapshot)
 	if err := confirmRestore(reader, out, phrase); err != nil {
 		return err
 	}
 
-	profileCfg := cfg.Profiles[*profile]
 	limiter, err := maxConcurrentWritesLimiter()
-	if err != nil {
-		return err
-	}
-	resolvedSnapshot, err := resolveSnapshot(ctx, runtime, profileCfg, restic.RestoreRequest{
-		SnapshotID: *snapshot,
-		App:        *appName,
-		Container:  selected.Spec.ContainerName,
-		Profile:    *profile,
-		SourceID:   *source,
-	})
 	if err != nil {
 		return err
 	}
@@ -541,6 +624,42 @@ func resolveSnapshot(ctx context.Context, runtime daemonRuntime, profile config.
 		return "", fmt.Errorf("no matching snapshot found for app=%s profile=%s source=%s", request.App, request.Profile, request.SourceID)
 	}
 	return snapshot.SnapshotID(), nil
+}
+
+func selectRestoreSnapshot(ctx context.Context, runtime daemonRuntime, profile config.Profile, request restic.RestoreRequest, reader *bufio.Reader, out io.Writer) (string, error) {
+	snapshots, err := querySnapshots(ctx, runtime, profile, request)
+	if err != nil {
+		return "", err
+	}
+	matching := make([]restic.Snapshot, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		if snapshot, ok := restic.LatestSnapshot([]restic.Snapshot{snapshot}, request.App, request.Container, request.Profile, request.SourceID); ok {
+			matching = append(matching, snapshot)
+		}
+	}
+	if len(matching) == 0 {
+		return "", fmt.Errorf("no matching snapshot found for app=%s profile=%s source=%s", request.App, request.Profile, request.SourceID)
+	}
+	sort.Slice(matching, func(i, j int) bool { return matching[i].Time > matching[j].Time })
+	fmt.Fprintln(out, "Select snapshot (Enter for latest):")
+	for i, snapshot := range matching {
+		label := snapshot.SnapshotID()
+		if i == 0 {
+			label += " (latest)"
+		}
+		fmt.Fprintf(out, "  %d) %s\t%s\n", i+1, label, snapshot.Time)
+	}
+	fmt.Fprint(out, "> ")
+	answer, _ := reader.ReadString('\n')
+	answer = strings.TrimSpace(answer)
+	if answer == "" {
+		return matching[0].SnapshotID(), nil
+	}
+	index, err := strconv.Atoi(answer)
+	if err != nil || index < 1 || index > len(matching) {
+		return "", fmt.Errorf("invalid selection %q", answer)
+	}
+	return matching[index-1].SnapshotID(), nil
 }
 
 func querySnapshots(ctx context.Context, runtime daemonRuntime, profile config.Profile, request restic.RestoreRequest) ([]restic.Snapshot, error) {
@@ -802,7 +921,7 @@ func maxConcurrentWritesLimiter() (*daemon.WriteLimiter, error) {
 }
 
 func usage(out io.Writer) error {
-	fmt.Fprintln(out, "usage: volust <daemon|apps|snapshots|backup|restore> [options]")
+	fmt.Fprintln(out, "usage: volust <daemon|apps|snapshots|ls|backup|restore> [options]")
 	return errors.New("missing or unknown command")
 }
 

@@ -141,6 +141,18 @@ func TestSnapshotsCommandFiltersLatestByTags(t *testing.T) {
 	}
 }
 
+func TestListCommandUsesResolvedSnapshot(t *testing.T) {
+	profile := config.Profile{Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app"}
+	cmd := ListCommand(profile, "abc123")
+	want := []string{"restic", "-r", "s3:s3.amazonaws.com/bucket/app", "--retry-lock", "6h", "ls", "abc123"}
+	if !equalStrings(cmd.Args, want) {
+		t.Fatalf("ls args = %#v, want %#v", cmd.Args, want)
+	}
+	if cmd.Operation != "ls" {
+		t.Fatalf("operation = %q", cmd.Operation)
+	}
+}
+
 func TestRestoreCommandQuotesShellArguments(t *testing.T) {
 	profile := config.Profile{Type: config.ProfileS3, Repository: "s3:s3.amazonaws.com/bucket/app repo"}
 	cmd := RestoreCommand(profile, RestoreRequest{

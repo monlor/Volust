@@ -91,13 +91,20 @@ docker exec volust volust snapshots --profile default --app my-app --source data
 docker exec volust volust snapshots --profile default --app my-app --source data --snapshot latest
 ```
 
+View the files stored in the latest snapshot (or pass a snapshot ID):
+
+```bash
+docker exec -it volust volust ls --profile default --app my-app --source data
+docker exec volust volust ls --profile default --app my-app --source data --snapshot abc123
+```
+
 Restore interactively using the existing Volust container:
 
 ```bash
 docker exec -it volust volust restore
 ```
 
-Volust first asks whether to restore one source or all discovered Docker named volumes. Restoring one source lists discovered applications and sources, then asks you to confirm the destructive restore. Restoring all volumes prints every selected `app/source -> volume` before confirmation.
+Volust first asks whether to restore one source or all discovered Docker named volumes. Restoring one source lists discovered applications and sources, then lists matching snapshots so you can select one (press Enter for `latest`) before it asks you to confirm the destructive restore. Restoring all volumes prints every selected `app/source -> volume` before confirmation and defaults to `latest`.
 
 You can also pass parameters directly:
 

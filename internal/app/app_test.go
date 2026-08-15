@@ -486,7 +486,7 @@ func TestRunRestorePromptsForMissingAppAndSource(t *testing.T) {
 	}()
 
 	var out bytes.Buffer
-	input := strings.NewReader("1\n1\nRESTORE postgres/config\n")
+	input := strings.NewReader("1\n1\n\nRESTORE postgres/config\n")
 	err := Run([]string{"restore", "--skip-pre-backup"}, input, &out)
 	if err != nil {
 		t.Fatalf("Run returned error: %v\noutput: %s", err, out.String())
@@ -497,7 +497,7 @@ func TestRunRestorePromptsForMissingAppAndSource(t *testing.T) {
 	if fake.jobs[1].Name != "volust-restore-postgres-config" {
 		t.Fatalf("job name = %q", fake.jobs[1].Name)
 	}
-	if !strings.Contains(out.String(), "Select restore mode") || !strings.Contains(out.String(), "Select application") || !strings.Contains(out.String(), "Select source") {
+	if !strings.Contains(out.String(), "Select restore mode") || !strings.Contains(out.String(), "Select application") || !strings.Contains(out.String(), "Select source") || !strings.Contains(out.String(), "Select snapshot") {
 		t.Fatalf("interactive output = %q", out.String())
 	}
 }
@@ -844,6 +844,63 @@ func TestRunSnapshotsUsesParameters(t *testing.T) {
 	}
 }
 
+func TestRunListShowsFilesFromLatestSnapshot(t *testing.T) {
+	path := writeConfig(t)
+	fake := &appFakeRuntime{
+		containers: []volustdocker.Container{{
+			ID: "abc", Name: "/postgres",
+			Labels: map[string]string{"volust.enabled": "true", "volust.profile": "s3prod", "volust.sources": "/data", "volust.schedule": "0 3 * * *"},
+			Mounts: []volustdocker.Mount{{Type: "volume", Name: "pgdata", Destination: "/data"}},
+		}},
+		workerOutput: map[string]string{"ls": "/volust/sources/postgres/data/config.yaml\n"},
+	}
+	oldRuntime := newRuntime
+	newRuntime = func() (daemonRuntime, error) { return fake, nil }
+	defer func() { newRuntime = oldRuntime }()
+
+	var out bytes.Buffer
+	err := Run([]string{"ls", "--config", path, "--profile", "s3prod", "--app", "postgres", "--source", "data"}, strings.NewReader(""), &out)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if !equalStrings(fake.events, []string{"job:snapshots", "job:ls"}) {
+		t.Fatalf("events = %#v", fake.events)
+	}
+	if got := strings.Join(fake.jobs[1].Args, " "); !strings.Contains(got, " ls snap-before-pre-backup") {
+		t.Fatalf("ls command = %q", got)
+	}
+	if output := out.String(); !strings.Contains(output, "Files for profile=s3prod app=postgres source=data snapshot=snap-before-pre-backup") || !strings.Contains(output, "config.yaml") {
+		t.Fatalf("output = %q", output)
+	}
+}
+
+func TestRunRestoreInteractivelySelectsSnapshot(t *testing.T) {
+	path := writeConfig(t)
+	fake := &appFakeRuntime{
+		containers: []volustdocker.Container{{
+			ID: "abc", Name: "/postgres",
+			Labels: map[string]string{"volust.enabled": "true", "volust.profile": "s3prod", "volust.sources": "/data,/config", "volust.schedule": "0 3 * * *"},
+			Mounts: []volustdocker.Mount{{Type: "volume", Name: "pgdata", Destination: "/data"}, {Type: "volume", Name: "pgconfig", Destination: "/config"}},
+		}},
+		snapshotOutput: `[{"short_id":"snap-new","id":"snap-new","time":"2026-01-02T00:00:00Z","tags":["volust","app:postgres","container:postgres","profile:s3prod","source:config"]},{"short_id":"snap-old","id":"snap-old","time":"2026-01-01T00:00:00Z","tags":["volust","app:postgres","container:postgres","profile:s3prod","source:config"]}]`,
+	}
+	oldRuntime := newRuntime
+	newRuntime = func() (daemonRuntime, error) { return fake, nil }
+	defer func() { newRuntime = oldRuntime }()
+
+	var out bytes.Buffer
+	err := Run([]string{"restore", "--config", path, "--profile", "s3prod", "--skip-pre-backup"}, strings.NewReader("1\n1\n2\nRESTORE postgres/config\n"), &out)
+	if err != nil {
+		t.Fatalf("Run returned error: %v\noutput: %s", err, out.String())
+	}
+	if got := strings.Join(fake.jobs[1].Args, " "); !strings.Contains(got, "restore snap-old") {
+		t.Fatalf("restore command = %q", got)
+	}
+	if output := out.String(); !strings.Contains(output, "Select snapshot") || !strings.Contains(output, "snap-new (latest)") || !strings.Contains(output, "Snapshot: snap-old") {
+		t.Fatalf("output = %q", output)
+	}
+}
+
 func TestRunSnapshotsReportsInvalidSnapshotOutput(t *testing.T) {
 	path := writeConfig(t)
 	fake := &appFakeRuntime{
@@ -1023,6 +1080,7 @@ type appFakeRuntime struct {
 	runJobErrByOperation    map[string]error
 	runJobErrByName         map[string]error
 	snapshotOutput          string
+	workerOutput            map[string]string
 }
 
 type appFakeJob struct {
@@ -1069,6 +1127,9 @@ func (f *appFakeRuntime) RunWorkerOutput(_ context.Context, worker volustdocker.
 	job := appFakeJob{Name: worker.Name, Image: worker.Image, Operation: command.Operation, Args: command.Args, Mounts: worker.Mounts}
 	f.jobs = append(f.jobs, job)
 	f.events = append(f.events, "job:"+job.Operation)
+	if output, ok := f.workerOutput[job.Operation]; ok {
+		return []byte(output), nil
+	}
 	if f.snapshotOutput != "" {
 		return []byte(f.snapshotOutput), nil
 	}
